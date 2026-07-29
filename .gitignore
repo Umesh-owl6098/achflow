@@ -22,6 +22,12 @@ pnpm-debug.log*
 .idea/
 .vscode/
 
+# AI editor tooling
+.agents/
+.claude/
+.windsurf/
+skills-lock.json
+
 # NestJS
 apps/*/dist/
 
