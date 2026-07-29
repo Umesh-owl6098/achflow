@@ -1,9 +1,12 @@
 import { OutboxEventStatus, OutboxEventType } from '@prisma/client';
 import { OutboxHandler, OutboxProcessingError } from './outbox.handler';
+import { PaymentValidationService } from '../payments/payment-validation.service';
 
 describe('OutboxHandler', () => {
   it('fails unsupported event types with a safe error', async () => {
-    const handler = new OutboxHandler();
+    const handler = new OutboxHandler({
+      validate: jest.fn(),
+    } as unknown as PaymentValidationService);
 
     await expect(
       handler.handle({

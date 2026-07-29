@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OutboxEvent, OutboxEventType, PaymentDirection } from '@prisma/client';
+import { PaymentValidationService } from '../payments/payment-validation.service';
+import { OutboxProcessingError } from './outbox-processing.error';
+
+export { OutboxProcessingError } from './outbox-processing.error';
 
 type PaymentReceivedPayload = {
   paymentId: string;
@@ -10,35 +14,31 @@ type PaymentReceivedPayload = {
   createdAt: string;
 };
 
-export class OutboxProcessingError extends Error {
-  constructor(readonly safeMessage: string) {
-    super(safeMessage);
-  }
-}
-
 @Injectable()
 export class OutboxHandler {
   private readonly logger = new Logger(OutboxHandler.name);
 
-  handle(event: OutboxEvent): Promise<void> {
-    return Promise.resolve().then(() => {
-      if (event.eventType !== OutboxEventType.PAYMENT_RECEIVED) {
-        throw new OutboxProcessingError('Unsupported outbox event type');
-      }
+  constructor(private readonly paymentValidation: PaymentValidationService) {}
 
-      const payload = this.parsePaymentReceivedPayload(event.payload);
+  async handle(event: OutboxEvent): Promise<void> {
+    if (event.eventType !== OutboxEventType.PAYMENT_RECEIVED) {
+      throw new OutboxProcessingError('Unsupported outbox event type');
+    }
 
-      this.logger.log(
-        JSON.stringify({
-          event: 'outbox.payment_received.handled',
-          eventId: event.id,
-          paymentId: payload.paymentId,
-          direction: payload.direction,
-          amountCents: payload.amountCents,
-          currency: payload.currency,
-        }),
-      );
-    });
+    const payload = this.parsePaymentReceivedPayload(event.payload);
+    await this.paymentValidation.validate(payload.paymentId);
+
+    this.logger.log(
+      JSON.stringify({
+        event: 'outbox.payment_received.handled',
+        eventId: event.id,
+        paymentId: payload.paymentId,
+        direction: payload.direction,
+        amountCents: payload.amountCents,
+        currency: payload.currency,
+        result: 'completed',
+      }),
+    );
   }
 
   private parsePaymentReceivedPayload(value: unknown): PaymentReceivedPayload {

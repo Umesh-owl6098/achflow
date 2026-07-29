@@ -14,6 +14,7 @@ enum PaymentDirection {
 enum PaymentStatus {
   RECEIVED
   VALIDATED
+  VALIDATION_FAILED
   PENDING
   PROCESSING
   SUBMITTED
@@ -51,6 +52,9 @@ model Payment {
   description        String?
   failureCode        String?
   failureReason      String?
+  validationCode     String?
+  validationMessage  String?
+  validatedAt        DateTime?
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 

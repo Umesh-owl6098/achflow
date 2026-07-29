@@ -2,12 +2,26 @@ import {
   OutboxEventStatus,
   OutboxEventType,
   PaymentDirection,
+  PaymentStatus,
 } from '@prisma/client';
 import { OutboxHandler } from '../src/outbox/outbox.handler';
 import { OutboxPollingService } from '../src/outbox/outbox-polling.service';
 import { OutboxRepository } from '../src/outbox/outbox.repository';
+import { PaymentLifecycleRepository } from '../src/payments/payment-lifecycle.repository';
+import { PaymentValidationService } from '../src/payments/payment-validation.service';
 import { WorkerConfigService } from '../src/worker-config.service';
 import { WorkerPrismaService } from '../src/worker-prisma.service';
+
+function paymentPayload(paymentId: string) {
+  return {
+    paymentId,
+    externalReference: `${paymentId}-reference`,
+    direction: PaymentDirection.DEBIT,
+    amountCents: '2500',
+    currency: 'USD',
+    createdAt: '2026-07-29T12:00:00.000Z',
+  };
+}
 
 describe('Outbox worker (integration)', () => {
   let prismaOne: WorkerPrismaService;
@@ -32,18 +46,23 @@ describe('Outbox worker (integration)', () => {
     repositoryTwo = new OutboxRepository(prismaTwo);
     workerOne = new OutboxPollingService(
       repositoryOne,
-      new OutboxHandler(),
+      new OutboxHandler(
+        new PaymentValidationService(new PaymentLifecycleRepository(prismaOne)),
+      ),
       config,
     );
     workerTwo = new OutboxPollingService(
       repositoryTwo,
-      new OutboxHandler(),
+      new OutboxHandler(
+        new PaymentValidationService(new PaymentLifecycleRepository(prismaTwo)),
+      ),
       config,
     );
   });
 
   beforeEach(async () => {
     await prismaOne.outboxEvent.deleteMany();
+    await prismaOne.payment.deleteMany();
   });
 
   afterAll(async () => {
@@ -54,6 +73,21 @@ describe('Outbox worker (integration)', () => {
   });
 
   it('processes multiple events once across concurrent worker instances', async () => {
+    await prismaOne.payment.createMany({
+      data: Array.from({ length: 3 }, (_, index) => ({
+        id: `pay-${index}`,
+        idempotencyKey: `idem-${index}`,
+        requestFingerprint: `fingerprint-${index}`,
+        externalReference: `reference-${index}`,
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2500),
+        currency: 'USD',
+        originatorName: 'Originator LLC',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `account-${index}`,
+        routingNumber: '021000021',
+      })),
+    });
     await prismaOne.outboxEvent.createMany({
       data: Array.from({ length: 3 }, (_, index) => ({
         eventType: OutboxEventType.PAYMENT_RECEIVED,
@@ -86,6 +120,98 @@ describe('Outbox worker (integration)', () => {
     );
     expect(events.every((event) => event.claimedAt === null)).toBe(true);
     expect(events.every((event) => event.lastError === null)).toBe(true);
+
+    const payments = await prismaOne.payment.findMany();
+    expect(
+      payments.every((payment) => payment.status === PaymentStatus.VALIDATED),
+    ).toBe(true);
+  });
+
+  it('processes validation failures without retrying and handles duplicate events idempotently', async () => {
+    await prismaOne.payment.createMany({
+      data: [
+        {
+          id: 'valid-payment',
+          idempotencyKey: 'valid-idem',
+          requestFingerprint: 'valid-fingerprint',
+          externalReference: 'valid-reference',
+          direction: PaymentDirection.CREDIT,
+          amountCents: BigInt(2500),
+          currency: 'USD',
+          originatorName: 'Originator LLC',
+          receiverName: 'Receiver Inc',
+          receiverAccountRef: 'valid-account',
+          routingNumber: '021000021',
+        },
+        {
+          id: 'invalid-payment',
+          idempotencyKey: 'invalid-idem',
+          requestFingerprint: 'invalid-fingerprint',
+          externalReference: 'invalid-reference',
+          direction: PaymentDirection.DEBIT,
+          amountCents: BigInt(0),
+          currency: 'USD',
+          originatorName: 'Originator LLC',
+          receiverName: 'Receiver Inc',
+          receiverAccountRef: 'invalid-account',
+          routingNumber: '021000021',
+        },
+      ],
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: ['valid-payment', 'invalid-payment'].map((paymentId) => ({
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: paymentId,
+        payload: paymentPayload(paymentId),
+      })),
+    });
+
+    await workerOne.processOnce();
+
+    const valid = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'valid-payment' },
+    });
+    const invalid = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'invalid-payment' },
+    });
+    expect(valid.status).toBe(PaymentStatus.VALIDATED);
+    expect(invalid).toMatchObject({
+      status: PaymentStatus.VALIDATION_FAILED,
+      validationCode: 'INVALID_AMOUNT',
+      validationMessage: 'Payment amount must be greater than zero',
+    });
+    expect(
+      await prismaOne.outboxEvent.count({
+        where: { status: OutboxEventStatus.PROCESSED },
+      }),
+    ).toBe(2);
+
+    const validatedAt = valid.validatedAt;
+    await prismaOne.outboxEvent.create({
+      data: {
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: valid.id,
+        payload: paymentPayload(valid.id),
+      },
+    });
+
+    await workerTwo.processOnce();
+
+    const replayed = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: valid.id },
+    });
+    expect(replayed.status).toBe(PaymentStatus.VALIDATED);
+    expect(replayed.validatedAt).toEqual(validatedAt);
+    expect(
+      await prismaOne.outboxEvent.count({
+        where: { status: OutboxEventStatus.PROCESSED },
+      }),
+    ).toBe(3);
+    expect(await prismaOne.outboxEvent.count({ where: { attempts: 1 } })).toBe(
+      3,
+    );
   });
 
   it('recovers stale claims safely across concurrent workers', async () => {
