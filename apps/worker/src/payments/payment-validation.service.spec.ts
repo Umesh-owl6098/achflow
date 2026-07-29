@@ -1,5 +1,9 @@
 import { Logger } from '@nestjs/common';
-import { PaymentDirection, PaymentStatus } from '@prisma/client';
+import {
+  MerchantStatus,
+  PaymentDirection,
+  PaymentStatus,
+} from '@prisma/client';
 import {
   PaymentForValidation,
   PaymentLifecycleRepository,
@@ -13,9 +17,14 @@ const payment: PaymentForValidation = {
   currency: 'USD',
   direction: PaymentDirection.DEBIT,
   externalReference: 'reference-1',
-  originatorName: 'Originator LLC',
   receiverAccountRef: 'account-token',
   routingNumber: '021000021',
+  merchant: {
+    status: MerchantStatus.ACTIVE,
+    allowAchDebit: true,
+    allowAchCredit: true,
+    perPaymentLimit: BigInt(10000),
+  },
 };
 
 describe('PaymentValidationService', () => {
@@ -116,6 +125,50 @@ describe('PaymentValidationService', () => {
 
     await expect(service.validate(payment.id)).rejects.toThrow(
       'database unavailable',
+    );
+  });
+
+  it('fails a suspended merchant as a business outcome', async () => {
+    const { service, repository } = createService({
+      ...payment,
+      merchant: { ...payment.merchant!, status: MerchantStatus.SUSPENDED },
+    });
+    await service.validate(payment.id);
+    expect(repository.transitionFromReceived).toHaveBeenCalledWith(payment.id, {
+      status: PaymentStatus.VALIDATION_FAILED,
+      code: 'MERCHANT_NOT_ACTIVE',
+      message: 'Payment merchant is not active',
+    });
+  });
+
+  it.each([
+    [PaymentDirection.DEBIT, 'allowAchDebit', 'ACH_DEBIT_NOT_ALLOWED'],
+    [PaymentDirection.CREDIT, 'allowAchCredit', 'ACH_CREDIT_NOT_ALLOWED'],
+  ])('fails disallowed %s direction', async (direction, permission, code) => {
+    const { service, repository } = createService({
+      ...payment,
+      direction,
+      merchant: { ...payment.merchant!, [permission]: false },
+    });
+    await service.validate(payment.id);
+    expect(repository.transitionFromReceived).toHaveBeenCalledWith(
+      payment.id,
+      expect.objectContaining({
+        status: PaymentStatus.VALIDATION_FAILED,
+        code,
+      }),
+    );
+  });
+
+  it('fails an amount above the merchant limit', async () => {
+    const { service, repository } = createService({
+      ...payment,
+      amountCents: BigInt(10001),
+    });
+    await service.validate(payment.id);
+    expect(repository.transitionFromReceived).toHaveBeenCalledWith(
+      payment.id,
+      expect.objectContaining({ code: 'PER_PAYMENT_LIMIT_EXCEEDED' }),
     );
   });
 });

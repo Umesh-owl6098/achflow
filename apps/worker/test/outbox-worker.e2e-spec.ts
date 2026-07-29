@@ -1,4 +1,5 @@
 import {
+  MerchantStatus,
   OutboxEventStatus,
   OutboxEventType,
   PaymentDirection,
@@ -63,6 +64,20 @@ describe('Outbox worker (integration)', () => {
   beforeEach(async () => {
     await prismaOne.outboxEvent.deleteMany();
     await prismaOne.payment.deleteMany();
+    await prismaOne.merchant.deleteMany();
+    await prismaOne.merchant.create({
+      data: {
+        id: 'merchant-1',
+        merchantCode: 'WORKER_TEST',
+        legalName: 'Worker Test LLC',
+        displayName: 'Worker Test',
+        status: MerchantStatus.ACTIVE,
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: BigInt(10000),
+        dailyAmountLimit: BigInt(100000),
+      },
+    });
   });
 
   afterAll(async () => {
@@ -82,7 +97,7 @@ describe('Outbox worker (integration)', () => {
         direction: PaymentDirection.DEBIT,
         amountCents: BigInt(2500),
         currency: 'USD',
-        originatorName: 'Originator LLC',
+        merchantId: 'merchant-1',
         receiverName: 'Receiver Inc',
         receiverAccountRef: `account-${index}`,
         routingNumber: '021000021',
@@ -138,7 +153,7 @@ describe('Outbox worker (integration)', () => {
           direction: PaymentDirection.CREDIT,
           amountCents: BigInt(2500),
           currency: 'USD',
-          originatorName: 'Originator LLC',
+          merchantId: 'merchant-1',
           receiverName: 'Receiver Inc',
           receiverAccountRef: 'valid-account',
           routingNumber: '021000021',
@@ -151,7 +166,7 @@ describe('Outbox worker (integration)', () => {
           direction: PaymentDirection.DEBIT,
           amountCents: BigInt(0),
           currency: 'USD',
-          originatorName: 'Originator LLC',
+          merchantId: 'merchant-1',
           receiverName: 'Receiver Inc',
           receiverAccountRef: 'invalid-account',
           routingNumber: '021000021',
@@ -204,6 +219,93 @@ describe('Outbox worker (integration)', () => {
     });
     expect(replayed.status).toBe(PaymentStatus.VALIDATED);
     expect(replayed.validatedAt).toEqual(validatedAt);
+    expect(
+      await prismaOne.outboxEvent.count({
+        where: { status: OutboxEventStatus.PROCESSED },
+      }),
+    ).toBe(3);
+    expect(await prismaOne.outboxEvent.count({ where: { attempts: 1 } })).toBe(
+      3,
+    );
+  });
+
+  it('processes merchant business-rule failures without retrying', async () => {
+    await prismaOne.merchant.createMany({
+      data: [
+        {
+          id: 'merchant-suspended',
+          merchantCode: 'SUSPENDED',
+          legalName: 'Suspended Test LLC',
+          displayName: 'Suspended Test',
+          status: MerchantStatus.SUSPENDED,
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(10000),
+          dailyAmountLimit: BigInt(100000),
+        },
+        {
+          id: 'merchant-credit-only',
+          merchantCode: 'CREDIT_ONLY',
+          legalName: 'Credit Test LLC',
+          displayName: 'Credit Test',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: false,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(10000),
+          dailyAmountLimit: BigInt(100000),
+        },
+        {
+          id: 'merchant-limited',
+          merchantCode: 'LIMITED',
+          legalName: 'Limited Test LLC',
+          displayName: 'Limited Test',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(1000),
+          dailyAmountLimit: BigInt(100000),
+        },
+      ],
+    });
+    const rows = [
+      ['merchant-suspended', 'merchant-suspended-payment', BigInt(500)],
+      ['merchant-credit-only', 'merchant-debit-payment', BigInt(500)],
+      ['merchant-limited', 'merchant-limit-payment', BigInt(1001)],
+    ] as const;
+    await prismaOne.payment.createMany({
+      data: rows.map(([merchantId, id, amountCents]) => ({
+        id,
+        merchantId,
+        idempotencyKey: `${id}-idem`,
+        requestFingerprint: `${id}-fingerprint`,
+        externalReference: `${id}-reference`,
+        direction: PaymentDirection.DEBIT,
+        amountCents,
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `${id}-account`,
+        routingNumber: '021000021',
+      })),
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: rows.map(([, id]) => ({
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: id,
+        payload: paymentPayload(id),
+      })),
+    });
+    await workerOne.processOnce();
+    await workerOne.processOnce();
+    const payments = await prismaOne.payment.findMany({
+      where: { id: { in: rows.map(([, id]) => id) } },
+      orderBy: { id: 'asc' },
+    });
+    expect(payments.map((payment) => payment.validationCode).sort()).toEqual([
+      'ACH_DEBIT_NOT_ALLOWED',
+      'MERCHANT_NOT_ACTIVE',
+      'PER_PAYMENT_LIMIT_EXCEEDED',
+    ]);
     expect(
       await prismaOne.outboxEvent.count({
         where: { status: OutboxEventStatus.PROCESSED },

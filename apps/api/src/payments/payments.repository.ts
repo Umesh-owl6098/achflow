@@ -14,11 +14,15 @@ export type CreatePaymentRecord = {
   direction: PaymentDirection;
   amountCents: bigint;
   currency: string;
-  originatorName: string;
+  merchantId: string;
   receiverName: string;
   receiverAccountRef: string;
   routingNumber: string;
   description?: string;
+};
+
+export type PaymentWithMerchant = Payment & {
+  merchant: { merchantCode: string; displayName: string };
 };
 
 export type PaymentReceivedOutboxPayload = {
@@ -34,9 +38,14 @@ export type PaymentReceivedOutboxPayload = {
 export class PaymentsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  createWithOutbox(data: CreatePaymentRecord): Promise<Payment> {
+  createWithOutbox(data: CreatePaymentRecord): Promise<PaymentWithMerchant> {
     return this.prisma.$transaction(async (transaction) => {
-      const payment = await transaction.payment.create({ data });
+      const payment = await transaction.payment.create({
+        data,
+        include: {
+          merchant: { select: { merchantCode: true, displayName: true } },
+        },
+      });
 
       await transaction.outboxEvent.create({
         data: {
@@ -51,15 +60,23 @@ export class PaymentsRepository {
     });
   }
 
-  findByIdempotencyKey(idempotencyKey: string): Promise<Payment | null> {
+  findByIdempotencyKey(
+    idempotencyKey: string,
+  ): Promise<PaymentWithMerchant | null> {
     return this.prisma.payment.findUnique({
       where: { idempotencyKey },
+      include: {
+        merchant: { select: { merchantCode: true, displayName: true } },
+      },
     });
   }
 
-  findById(id: string): Promise<Payment | null> {
+  findById(id: string): Promise<PaymentWithMerchant | null> {
     return this.prisma.payment.findUnique({
       where: { id },
+      include: {
+        merchant: { select: { merchantCode: true, displayName: true } },
+      },
     });
   }
 

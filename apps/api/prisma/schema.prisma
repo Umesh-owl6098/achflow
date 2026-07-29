@@ -36,6 +36,27 @@ enum OutboxEventStatus {
   FAILED
 }
 
+enum MerchantStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+model Merchant {
+  id               String         @id @default(uuid())
+  merchantCode     String         @unique
+  legalName        String
+  displayName      String
+  status           MerchantStatus @default(ACTIVE)
+  allowAchDebit    Boolean        @default(false)
+  allowAchCredit   Boolean        @default(false)
+  perPaymentLimit  BigInt
+  dailyAmountLimit BigInt
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  payments         Payment[]
+}
+
 model Payment {
   id                 String           @id @default(uuid())
   idempotencyKey     String           @unique
@@ -45,7 +66,7 @@ model Payment {
   status             PaymentStatus    @default(RECEIVED)
   amountCents        BigInt
   currency           String           @default("USD")
-  originatorName     String
+  merchantId         String
   receiverName       String
   receiverAccountRef String
   routingNumber      String
@@ -58,8 +79,11 @@ model Payment {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+
   @@index([status])
   @@index([createdAt])
+  @@index([merchantId])
 }
 
 model OutboxEvent {

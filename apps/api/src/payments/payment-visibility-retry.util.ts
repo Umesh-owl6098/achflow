@@ -1,5 +1,3 @@
-import { Payment } from '@prisma/client';
-
 export const paymentVisibilityRetryDelaysMs = [10, 25, 50] as const;
 
 type Sleep = (delayMs: number) => Promise<void>;
@@ -7,10 +5,10 @@ type Sleep = (delayMs: number) => Promise<void>;
 const sleep: Sleep = (delayMs) =>
   new Promise((resolve) => setTimeout(resolve, delayMs));
 
-export async function findPaymentWithVisibilityRetry(
-  findPayment: () => Promise<Payment | null>,
+export async function findPaymentWithVisibilityRetry<T>(
+  findPayment: () => Promise<T | null>,
   wait: Sleep = sleep,
-): Promise<Payment | null> {
+): Promise<T | null> {
   let payment = await findPayment();
 
   if (payment) {

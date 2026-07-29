@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { PaymentDirection, PaymentStatus, Prisma } from '@prisma/client';
+import {
+  MerchantStatus,
+  PaymentDirection,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 import { OutboxProcessingError } from '../outbox/outbox-processing.error';
 import { WorkerPrismaService } from '../worker-prisma.service';
 
@@ -10,9 +15,14 @@ export type PaymentForValidation = {
   currency: string;
   direction: PaymentDirection;
   externalReference: string | null;
-  originatorName: string;
   receiverAccountRef: string;
   routingNumber: string;
+  merchant: {
+    status: MerchantStatus;
+    allowAchDebit: boolean;
+    allowAchCredit: boolean;
+    perPaymentLimit: bigint;
+  } | null;
 };
 
 export type ValidationResult = {
@@ -36,9 +46,16 @@ export class PaymentLifecycleRepository {
         currency: true,
         direction: true,
         externalReference: true,
-        originatorName: true,
         receiverAccountRef: true,
         routingNumber: true,
+        merchant: {
+          select: {
+            status: true,
+            allowAchDebit: true,
+            allowAchCredit: true,
+            perPaymentLimit: true,
+          },
+        },
       },
     });
   }

@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PaymentDirection, PaymentStatus } from '@prisma/client';
+import {
+  MerchantStatus,
+  PaymentDirection,
+  PaymentStatus,
+} from '@prisma/client';
 import {
   PaymentForValidation,
   PaymentLifecycleRepository,
@@ -68,10 +72,44 @@ export class PaymentValidationService {
       );
     }
 
-    if (!payment.originatorName.trim()) {
+    if (!payment.merchant) {
       return this.failed(
-        'MISSING_ORIGINATOR',
-        'Payment originator is required',
+        'MERCHANT_NOT_FOUND',
+        'Payment merchant was not found',
+      );
+    }
+
+    if (payment.merchant.status !== MerchantStatus.ACTIVE) {
+      return this.failed(
+        'MERCHANT_NOT_ACTIVE',
+        'Payment merchant is not active',
+      );
+    }
+
+    if (
+      payment.direction === PaymentDirection.DEBIT &&
+      !payment.merchant.allowAchDebit
+    ) {
+      return this.failed(
+        'ACH_DEBIT_NOT_ALLOWED',
+        'Merchant is not allowed to initiate ACH debits',
+      );
+    }
+
+    if (
+      payment.direction === PaymentDirection.CREDIT &&
+      !payment.merchant.allowAchCredit
+    ) {
+      return this.failed(
+        'ACH_CREDIT_NOT_ALLOWED',
+        'Merchant is not allowed to initiate ACH credits',
+      );
+    }
+
+    if (payment.amountCents > payment.merchant.perPaymentLimit) {
+      return this.failed(
+        'PER_PAYMENT_LIMIT_EXCEEDED',
+        'Payment amount exceeds the merchant per-payment limit',
       );
     }
 

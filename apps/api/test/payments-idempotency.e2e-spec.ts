@@ -1,4 +1,8 @@
-import { OutboxEventType, PaymentDirection } from '@prisma/client';
+import {
+  MerchantStatus,
+  OutboxEventType,
+  PaymentDirection,
+} from '@prisma/client';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
@@ -19,7 +23,7 @@ describe('Payments idempotency (integration)', () => {
     direction: PaymentDirection.DEBIT,
     amountCents: 5000,
     currency: 'USD',
-    originatorName: 'Originator LLC',
+    merchantCode: 'TEST_BOTH',
     receiverName: 'Receiver Inc',
     receiverAccountRef: 'acct-integration-1',
     routingNumber: '021000021',
@@ -49,6 +53,31 @@ describe('Payments idempotency (integration)', () => {
   beforeEach(async () => {
     await prisma.outboxEvent.deleteMany();
     await prisma.payment.deleteMany();
+    await prisma.merchant.deleteMany();
+    await prisma.merchant.createMany({
+      data: [
+        {
+          merchantCode: 'TEST_BOTH',
+          legalName: 'Test Both LLC',
+          displayName: 'Test Both',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(1000000),
+          dailyAmountLimit: BigInt(5000000),
+        },
+        {
+          merchantCode: 'TEST_CREDIT',
+          legalName: 'Test Credit LLC',
+          displayName: 'Test Credit',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: false,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(1000000),
+          dailyAmountLimit: BigInt(5000000),
+        },
+      ],
+    });
   });
 
   afterAll(async () => {
@@ -66,6 +95,11 @@ describe('Payments idempotency (integration)', () => {
     expect(body.id).toBeDefined();
     expect(body.idempotencyKey).toBe(paymentPayload.idempotencyKey);
     expect(body.amountCents).toBe('5000');
+    expect(body.status).toBe('RECEIVED');
+    expect(body.merchant).toEqual({
+      merchantCode: 'TEST_BOTH',
+      displayName: 'Test Both',
+    });
     expect(body).not.toHaveProperty('requestFingerprint');
 
     const count = await prisma.payment.count();
@@ -154,6 +188,24 @@ describe('Payments idempotency (integration)', () => {
 
     const count = await prisma.payment.count();
     expect(count).toBe(1);
+  });
+
+  it('rejects an unknown merchant code', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .send({ ...paymentPayload, merchantCode: 'UNKNOWN' })
+      .expect(404);
+  });
+
+  it('returns 409 when the same key is reused by a different merchant', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .send(paymentPayload)
+      .expect(201);
+    await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .send({ ...paymentPayload, merchantCode: 'TEST_CREDIT' })
+      .expect(409);
   });
 
   it('creates only one database record for concurrent identical requests', async () => {

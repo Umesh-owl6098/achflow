@@ -10,7 +10,7 @@ describe('PaymentsRepository', () => {
     direction: PaymentDirection.DEBIT,
     amountCents: BigInt(2500),
     currency: 'USD',
-    originatorName: 'Originator LLC',
+    merchantId: 'merchant-1',
     receiverName: 'Receiver Inc',
     receiverAccountRef: 'acct-123',
     routingNumber: '021000021',
@@ -26,6 +26,7 @@ describe('PaymentsRepository', () => {
     failureReason: null,
     createdAt: new Date('2026-07-29T12:00:00.000Z'),
     updatedAt: new Date('2026-07-29T12:00:00.000Z'),
+    merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
   };
 
   it('creates a payment and safe outbox event in one transaction', async () => {
@@ -44,7 +45,12 @@ describe('PaymentsRepository', () => {
     await expect(repository.createWithOutbox(data)).resolves.toBe(payment);
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(transaction.payment.create).toHaveBeenCalledWith({ data });
+    expect(transaction.payment.create).toHaveBeenCalledWith({
+      data,
+      include: {
+        merchant: { select: { merchantCode: true, displayName: true } },
+      },
+    });
     expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
       data: {
         eventType: OutboxEventType.PAYMENT_RECEIVED,

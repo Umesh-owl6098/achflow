@@ -8,7 +8,10 @@ export class PaymentResponseDto {
   status!: PaymentStatus;
   amountCents!: string;
   currency!: string;
-  originatorName!: string;
+  merchant!: {
+    merchantCode: string;
+    displayName: string;
+  };
   receiverName!: string;
   receiverAccountRef!: string;
   routingNumber!: string;

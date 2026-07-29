@@ -13,6 +13,7 @@ import {
 import { PaymentResponseDto } from './dto/payment-response.dto';
 import { findPaymentWithVisibilityRetry } from './payment-visibility-retry.util';
 import { PaymentsRepository } from './payments.repository';
+import { MerchantsRepository } from './merchants.repository';
 
 export type CreatePaymentResult = {
   payment: PaymentResponseDto;
@@ -21,11 +22,26 @@ export type CreatePaymentResult = {
 
 @Injectable()
 export class PaymentsService {
-  constructor(private readonly paymentsRepository: PaymentsRepository) {}
+  constructor(
+    private readonly paymentsRepository: PaymentsRepository,
+    private readonly merchantsRepository: MerchantsRepository,
+  ) {}
 
   async create(dto: CreatePaymentDto): Promise<CreatePaymentResult> {
-    const requestFingerprint = buildPaymentRequestFingerprint(dto);
-    const data = mapCreatePaymentDtoToRecord(dto, requestFingerprint);
+    const merchant = await this.merchantsRepository.findByCode(
+      dto.merchantCode,
+    );
+    if (!merchant) {
+      throw new NotFoundException(
+        `Merchant ${dto.merchantCode} was not found.`,
+      );
+    }
+    const requestFingerprint = buildPaymentRequestFingerprint(dto, merchant.id);
+    const data = mapCreatePaymentDtoToRecord(
+      dto,
+      requestFingerprint,
+      merchant.id,
+    );
 
     try {
       const payment = await this.paymentsRepository.createWithOutbox(data);

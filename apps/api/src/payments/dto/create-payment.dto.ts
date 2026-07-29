@@ -36,8 +36,8 @@ export class CreatePaymentDto {
 
   @IsString()
   @IsNotEmpty()
-  @MaxLength(140)
-  originatorName!: string;
+  @MaxLength(100)
+  merchantCode!: string;
 
   @IsString()
   @IsNotEmpty()

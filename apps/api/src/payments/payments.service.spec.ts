@@ -8,6 +8,9 @@ import { CreatePaymentDto } from './dto/create-payment.dto';
 import { buildPaymentRequestFingerprint } from './payment-fingerprint.util';
 import { PaymentsRepository } from './payments.repository';
 import { PaymentsService } from './payments.service';
+import { MerchantsRepository } from './merchants.repository';
+
+const merchant = { id: 'merchant-1', merchantCode: 'TEST_BOTH' };
 
 describe('buildPaymentRequestFingerprint', () => {
   const baseDto: CreatePaymentDto = {
@@ -15,7 +18,7 @@ describe('buildPaymentRequestFingerprint', () => {
     direction: PaymentDirection.DEBIT,
     amountCents: 1000,
     currency: 'usd',
-    originatorName: 'Originator LLC',
+    merchantCode: 'TEST_BOTH',
     receiverName: 'Receiver Inc',
     receiverAccountRef: 'acct-123',
     routingNumber: '021000021',
@@ -23,34 +26,46 @@ describe('buildPaymentRequestFingerprint', () => {
   };
 
   it('produces a stable hash for the same payload', () => {
-    const first = buildPaymentRequestFingerprint(baseDto);
-    const second = buildPaymentRequestFingerprint({
-      ...baseDto,
-      idempotencyKey: 'different-key',
-    });
+    const first = buildPaymentRequestFingerprint(baseDto, merchant.id);
+    const second = buildPaymentRequestFingerprint(
+      {
+        ...baseDto,
+        idempotencyKey: 'different-key',
+      },
+      merchant.id,
+    );
 
     expect(first).toBe(second);
   });
 
   it('normalizes currency casing before hashing', () => {
-    const lower = buildPaymentRequestFingerprint({
-      ...baseDto,
-      currency: 'usd',
-    });
-    const upper = buildPaymentRequestFingerprint({
-      ...baseDto,
-      currency: 'USD',
-    });
+    const lower = buildPaymentRequestFingerprint(
+      {
+        ...baseDto,
+        currency: 'usd',
+      },
+      merchant.id,
+    );
+    const upper = buildPaymentRequestFingerprint(
+      {
+        ...baseDto,
+        currency: 'USD',
+      },
+      merchant.id,
+    );
 
     expect(lower).toBe(upper);
   });
 
   it('changes when a payment field changes', () => {
-    const original = buildPaymentRequestFingerprint(baseDto);
-    const changed = buildPaymentRequestFingerprint({
-      ...baseDto,
-      amountCents: 2000,
-    });
+    const original = buildPaymentRequestFingerprint(baseDto, merchant.id);
+    const changed = buildPaymentRequestFingerprint(
+      {
+        ...baseDto,
+        amountCents: 2000,
+      },
+      merchant.id,
+    );
 
     expect(changed).not.toBe(original);
   });
@@ -64,19 +79,20 @@ describe('PaymentsService', () => {
     findById: jest.Mock;
     isUniqueConstraintViolation: jest.Mock;
   };
+  let merchantsRepository: { findByCode: jest.Mock };
 
   const dto: CreatePaymentDto = {
     idempotencyKey: 'idem-1',
     direction: PaymentDirection.DEBIT,
     amountCents: 2500,
     currency: 'USD',
-    originatorName: 'Originator LLC',
+    merchantCode: 'TEST_BOTH',
     receiverName: 'Receiver Inc',
     receiverAccountRef: 'acct-123',
     routingNumber: '021000021',
   };
 
-  const fingerprint = buildPaymentRequestFingerprint(dto);
+  const fingerprint = buildPaymentRequestFingerprint(dto, merchant.id);
 
   const paymentRecord = {
     id: 'pay-1',
@@ -87,7 +103,6 @@ describe('PaymentsService', () => {
     status: 'RECEIVED' as const,
     amountCents: BigInt(2500),
     currency: 'USD',
-    originatorName: dto.originatorName,
     receiverName: dto.receiverName,
     receiverAccountRef: dto.receiverAccountRef,
     routingNumber: dto.routingNumber,
@@ -96,6 +111,7 @@ describe('PaymentsService', () => {
     failureReason: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
   };
 
   beforeEach(async () => {
@@ -109,6 +125,7 @@ describe('PaymentsService', () => {
           error.code === 'P2002',
       ),
     };
+    merchantsRepository = { findByCode: jest.fn().mockResolvedValue(merchant) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -117,6 +134,7 @@ describe('PaymentsService', () => {
           provide: PaymentsRepository,
           useValue: repository,
         },
+        { provide: MerchantsRepository, useValue: merchantsRepository },
       ],
     }).compile();
 
@@ -132,6 +150,7 @@ describe('PaymentsService', () => {
       expect.objectContaining({
         idempotencyKey: dto.idempotencyKey,
         requestFingerprint: fingerprint,
+        merchantId: merchant.id,
         amountCents: BigInt(2500),
       }),
     );
