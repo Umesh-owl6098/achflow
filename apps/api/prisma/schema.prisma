@@ -67,11 +67,13 @@ model OutboxEvent {
   status        OutboxEventStatus @default(PENDING)
   attempts      Int               @default(0)
   availableAt   DateTime          @default(now())
+  claimedAt     DateTime?
   processedAt   DateTime?
   lastError     String?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
 
   @@index([status, availableAt])
+  @@index([status, claimedAt])
   @@index([aggregateType, aggregateId])
 }
