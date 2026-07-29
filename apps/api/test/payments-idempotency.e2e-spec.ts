@@ -9,9 +9,6 @@ import { PaymentResponseDto } from '../src/payments/dto/payment-response.dto';
 import { PaymentsService } from '../src/payments/payments.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
-const defaultDatabaseUrl =
-  'postgresql://achflow:achflow@localhost:5435/achflow';
-
 describe('Payments idempotency (integration)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
@@ -30,8 +27,6 @@ describe('Payments idempotency (integration)', () => {
   };
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= defaultDatabaseUrl;
-
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

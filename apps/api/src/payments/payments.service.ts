@@ -1,6 +1,7 @@
 import {
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { CreatePaymentDto } from './dto/create-payment.dto';
@@ -10,6 +11,7 @@ import {
   serializePayment,
 } from './payment.mapper';
 import { PaymentResponseDto } from './dto/payment-response.dto';
+import { findPaymentWithVisibilityRetry } from './payment-visibility-retry.util';
 import { PaymentsRepository } from './payments.repository';
 
 export type CreatePaymentResult = {
@@ -58,12 +60,13 @@ export class PaymentsService {
     idempotencyKey: string,
     requestFingerprint: string,
   ): Promise<CreatePaymentResult> {
-    const existingPayment =
-      await this.paymentsRepository.findByIdempotencyKey(idempotencyKey);
+    const existingPayment = await findPaymentWithVisibilityRetry(() =>
+      this.paymentsRepository.findByIdempotencyKey(idempotencyKey),
+    );
 
     if (!existingPayment) {
-      throw new ConflictException(
-        'A payment already exists for this idempotency key.',
+      throw new InternalServerErrorException(
+        'Payment could not be read after a concurrent idempotency conflict.',
       );
     }
 

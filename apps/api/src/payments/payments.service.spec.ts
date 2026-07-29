@@ -1,4 +1,7 @@
-import { ConflictException } from '@nestjs/common';
+import {
+  ConflictException,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PaymentDirection, Prisma } from '@prisma/client';
 import { CreatePaymentDto } from './dto/create-payment.dto';
@@ -157,6 +160,25 @@ describe('PaymentsService', () => {
     expect(result.payment).not.toHaveProperty('requestFingerprint');
   });
 
+  it('returns the original payment when it becomes visible after retries', async () => {
+    repository.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '7.9.1',
+      }),
+    );
+    repository.findByIdempotencyKey
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(paymentRecord);
+
+    const result = await service.create(dto);
+
+    expect(repository.findByIdempotencyKey).toHaveBeenCalledTimes(2);
+    expect(result.created).toBe(false);
+    expect(result.payment.id).toBe('pay-1');
+    expect(result.payment).not.toHaveProperty('requestFingerprint');
+  });
+
   it('does not expose the request fingerprint when retrieving a payment', async () => {
     repository.findById.mockResolvedValue(paymentRecord);
 
@@ -185,5 +207,23 @@ describe('PaymentsService', () => {
         amountCents: 9999,
       }),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('returns an internal error when a payment never becomes visible after P2002', async () => {
+    repository.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '7.9.1',
+      }),
+    );
+    repository.findByIdempotencyKey.mockResolvedValue(null);
+
+    await expect(service.create(dto)).rejects.toMatchObject({
+      status: 500,
+      message:
+        'Payment could not be read after a concurrent idempotency conflict.',
+    } satisfies Partial<InternalServerErrorException>);
+
+    expect(repository.findByIdempotencyKey).toHaveBeenCalledTimes(4);
   });
 });

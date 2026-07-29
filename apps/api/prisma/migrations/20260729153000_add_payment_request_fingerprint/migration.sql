@@ -1,5 +1,4 @@
--- AlterTable
-ALTER TABLE "Payment" ADD COLUMN "requestFingerprint" TEXT NOT NULL DEFAULT '';
-
--- Remove temporary default after backfill for any existing rows
-ALTER TABLE "Payment" ALTER COLUMN "requestFingerprint" DROP DEFAULT;
+-- Legacy migration retained for databases that recorded this migration before
+-- the Payment table migration was introduced. The column is added by the later
+-- 20260729203000 migration after Payment has been created.
+SELECT 1;
