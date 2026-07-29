@@ -2,11 +2,12 @@ import {
   Body,
   Controller,
   Get,
-  HttpCode,
   HttpStatus,
   Param,
   Post,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { PaymentsService } from './payments.service';
 
@@ -15,9 +16,15 @@ export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Post()
-  @HttpCode(HttpStatus.CREATED)
-  create(@Body() dto: CreatePaymentDto) {
-    return this.paymentsService.create(dto);
+  async create(
+    @Body() dto: CreatePaymentDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { payment, created } = await this.paymentsService.create(dto);
+
+    res.status(created ? HttpStatus.CREATED : HttpStatus.OK);
+
+    return payment;
   }
 
   @Get(':id')

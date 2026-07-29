@@ -3,72 +3,79 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { buildPaymentRequestFingerprint } from './payment-fingerprint.util';
+import {
+  mapCreatePaymentDtoToRecord,
+  serializePayment,
+  SerializedPayment,
+} from './payment.mapper';
+import { PaymentsRepository } from './payments.repository';
+
+export type CreatePaymentResult = {
+  payment: SerializedPayment;
+  created: boolean;
+};
 
 @Injectable()
 export class PaymentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly paymentsRepository: PaymentsRepository) {}
 
-  async create(dto: CreatePaymentDto) {
-    const existingPayment = await this.prisma.payment.findUnique({
-      where: {
-        idempotencyKey: dto.idempotencyKey,
-      },
-    });
-
-    if (existingPayment) {
-      return this.serialize(existingPayment);
-    }
+  async create(dto: CreatePaymentDto): Promise<CreatePaymentResult> {
+    const requestFingerprint = buildPaymentRequestFingerprint(dto);
+    const data = mapCreatePaymentDtoToRecord(dto, requestFingerprint);
 
     try {
-      const payment = await this.prisma.payment.create({
-        data: {
-          idempotencyKey: dto.idempotencyKey,
-          externalReference: dto.externalReference,
-          direction: dto.direction,
-          amountCents: BigInt(dto.amountCents),
-          currency: dto.currency?.toUpperCase() ?? 'USD',
-          originatorName: dto.originatorName,
-          receiverName: dto.receiverName,
-          receiverAccountRef: dto.receiverAccountRef,
-          routingNumber: dto.routingNumber,
-          description: dto.description,
-        },
-      });
+      const payment = await this.paymentsRepository.create(data);
 
-      return this.serialize(payment);
+      return {
+        payment: serializePayment(payment),
+        created: true,
+      };
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        throw new ConflictException(
-          'A payment already exists for this idempotency key.',
-        );
+      if (!this.paymentsRepository.isUniqueConstraintViolation(error)) {
+        throw error;
       }
 
-      throw error;
+      return this.handleIdempotencyConflict(
+        dto.idempotencyKey,
+        requestFingerprint,
+      );
     }
   }
 
-  async findOne(id: string) {
-    const payment = await this.prisma.payment.findUnique({
-      where: { id },
-    });
+  async findOne(id: string): Promise<SerializedPayment> {
+    const payment = await this.paymentsRepository.findById(id);
 
     if (!payment) {
       throw new NotFoundException(`Payment ${id} was not found.`);
     }
 
-    return this.serialize(payment);
+    return serializePayment(payment);
   }
 
-  private serialize<T extends { amountCents: bigint }>(payment: T) {
+  private async handleIdempotencyConflict(
+    idempotencyKey: string,
+    requestFingerprint: string,
+  ): Promise<CreatePaymentResult> {
+    const existingPayment =
+      await this.paymentsRepository.findByIdempotencyKey(idempotencyKey);
+
+    if (!existingPayment) {
+      throw new ConflictException(
+        'A payment already exists for this idempotency key.',
+      );
+    }
+
+    if (existingPayment.requestFingerprint !== requestFingerprint) {
+      throw new ConflictException(
+        'Idempotency key reused with a different request payload.',
+      );
+    }
+
     return {
-      ...payment,
-      amountCents: payment.amountCents.toString(),
+      payment: serializePayment(existingPayment),
+      created: false,
     };
   }
 }

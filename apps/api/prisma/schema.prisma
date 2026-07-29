@@ -27,6 +27,7 @@ enum PaymentStatus {
 model Payment {
   id                 String           @id @default(uuid())
   idempotencyKey     String           @unique
+  requestFingerprint String
   externalReference  String?
   direction          PaymentDirection
   status             PaymentStatus    @default(RECEIVED)
