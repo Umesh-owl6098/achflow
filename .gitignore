@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# NestJS
+apps/*/dist/
+
+# React/Vite
+apps/web/.vite/
+apps/web/dist/
+
+# Prisma
+*.db
+*.db-journal
