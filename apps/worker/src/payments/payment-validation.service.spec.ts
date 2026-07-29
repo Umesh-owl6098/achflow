@@ -12,11 +12,13 @@ import { PaymentValidationService } from './payment-validation.service';
 
 const payment: PaymentForValidation = {
   id: 'pay-1',
+  merchantId: 'merchant-1',
   status: PaymentStatus.RECEIVED,
   amountCents: BigInt(2500),
   currency: 'USD',
   direction: PaymentDirection.DEBIT,
   externalReference: 'reference-1',
+  createdAt: new Date('2026-07-29T12:00:00.000Z'),
   receiverAccountRef: 'account-token',
   routingNumber: '021000021',
   merchant: {
@@ -24,6 +26,7 @@ const payment: PaymentForValidation = {
     allowAchDebit: true,
     allowAchCredit: true,
     perPaymentLimit: BigInt(10000),
+    dailyAmountLimit: BigInt(50000),
   },
 };
 
@@ -32,6 +35,11 @@ describe('PaymentValidationService', () => {
     const repository = {
       findForValidation: jest.fn().mockResolvedValue(paymentResult),
       transitionFromReceived: jest.fn().mockResolvedValue(undefined),
+      reserveDailyUsageAndTransition: jest.fn().mockResolvedValue({
+        status: PaymentStatus.VALIDATED,
+        code: null,
+        message: null,
+      }),
     };
 
     return {
@@ -49,13 +57,9 @@ describe('PaymentValidationService', () => {
 
       await service.validate(payment.id);
 
-      expect(repository.transitionFromReceived).toHaveBeenCalledWith(
-        payment.id,
-        {
-          status: PaymentStatus.VALIDATED,
-          code: null,
-          message: null,
-        },
+      expect(repository.reserveDailyUsageAndTransition).toHaveBeenCalledWith(
+        expect.objectContaining({ id: payment.id, direction }),
+        undefined,
       );
     },
   );
@@ -169,6 +173,22 @@ describe('PaymentValidationService', () => {
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(
       payment.id,
       expect.objectContaining({ code: 'PER_PAYMENT_LIMIT_EXCEEDED' }),
+    );
+  });
+
+  it('returns the daily-limit business failure without retrying', async () => {
+    const { service, repository } = createService();
+    repository.reserveDailyUsageAndTransition.mockResolvedValue({
+      status: PaymentStatus.VALIDATION_FAILED,
+      code: 'EXCEEDS_DAILY_AMOUNT_LIMIT',
+      message: 'Daily limit 5000 exceeded: utilized 4000, requested 1500',
+    });
+
+    await service.validate(payment.id, 'event-1');
+
+    expect(repository.reserveDailyUsageAndTransition).toHaveBeenCalledWith(
+      payment,
+      'event-1',
     );
   });
 });

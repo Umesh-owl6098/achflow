@@ -53,6 +53,7 @@ describe('Payments idempotency (integration)', () => {
   beforeEach(async () => {
     await prisma.outboxEvent.deleteMany();
     await prisma.payment.deleteMany();
+    await prisma.merchantDailyUsage.deleteMany();
     await prisma.merchant.deleteMany();
     await prisma.merchant.createMany({
       data: [

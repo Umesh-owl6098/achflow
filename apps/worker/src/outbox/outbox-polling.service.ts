@@ -71,6 +71,8 @@ export class OutboxPollingService
   private async processClaimedEvent(event: OutboxEvent): Promise<void> {
     try {
       await this.handler.handle(event);
+      // Daily-limit validation commits payment state, usage, and this claimed event together.
+      // Existing terminal validation paths remain completed here.
       await this.repository.markProcessed(event.id);
     } catch (error) {
       await this.repository.markFailed(

@@ -64,6 +64,7 @@ describe('Outbox worker (integration)', () => {
   beforeEach(async () => {
     await prismaOne.outboxEvent.deleteMany();
     await prismaOne.payment.deleteMany();
+    await prismaOne.merchantDailyUsage.deleteMany();
     await prismaOne.merchant.deleteMany();
     await prismaOne.merchant.create({
       data: {
@@ -116,6 +117,7 @@ describe('Outbox worker (integration)', () => {
           currency: 'USD',
           createdAt: '2026-07-29T12:00:00.000Z',
         },
+        availableAt: new Date(0),
       })),
     });
 
@@ -179,6 +181,7 @@ describe('Outbox worker (integration)', () => {
         aggregateType: 'PAYMENT',
         aggregateId: paymentId,
         payload: paymentPayload(paymentId),
+        availableAt: new Date(0),
       })),
     });
 
@@ -209,6 +212,7 @@ describe('Outbox worker (integration)', () => {
         aggregateType: 'PAYMENT',
         aggregateId: valid.id,
         payload: paymentPayload(valid.id),
+        availableAt: new Date(Date.now() - 1_000),
       },
     });
 
@@ -293,6 +297,7 @@ describe('Outbox worker (integration)', () => {
         aggregateType: 'PAYMENT',
         aggregateId: id,
         payload: paymentPayload(id),
+        availableAt: new Date(0),
       })),
     });
     await workerOne.processOnce();
@@ -314,6 +319,65 @@ describe('Outbox worker (integration)', () => {
     expect(await prismaOne.outboxEvent.count({ where: { attempts: 1 } })).toBe(
       3,
     );
+  });
+
+  it('serializes concurrent daily-limit reservations without double-counting', async () => {
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        dailyAmountLimit: BigInt(10_000),
+        perPaymentLimit: BigInt(10_000),
+      },
+    });
+    await prismaOne.payment.createMany({
+      data: ['daily-one', 'daily-two'].map((id) => ({
+        id,
+        merchantId: 'merchant-1',
+        idempotencyKey: `${id}-idem`,
+        requestFingerprint: `${id}-fingerprint`,
+        externalReference: `${id}-reference`,
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(6_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `${id}-account`,
+        routingNumber: '021000021',
+      })),
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: ['daily-one', 'daily-two'].map((id) => ({
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: id,
+        payload: paymentPayload(id),
+        availableAt: new Date(0),
+      })),
+    });
+
+    await Promise.all([workerOne.processOnce(), workerTwo.processOnce()]);
+
+    const payments = await prismaOne.payment.findMany({
+      where: { id: { in: ['daily-one', 'daily-two'] } },
+    });
+    expect(
+      payments.filter((item) => item.status === PaymentStatus.VALIDATED),
+    ).toHaveLength(1);
+    expect(
+      payments.find((item) => item.status === PaymentStatus.VALIDATION_FAILED),
+    ).toMatchObject({
+      validationCode: 'EXCEEDS_DAILY_AMOUNT_LIMIT',
+      failureCode: 'EXCEEDS_DAILY_AMOUNT_LIMIT',
+    });
+    expect(
+      await prismaOne.merchantDailyUsage.findUnique({
+        where: {
+          merchantId_businessDate: {
+            merchantId: 'merchant-1',
+            businessDate: new Date(Date.UTC(2026, 6, 29)),
+          },
+        },
+      }),
+    ).toMatchObject({ utilizedAmount: BigInt(6_000) });
   });
 
   it('recovers stale claims safely across concurrent workers', async () => {

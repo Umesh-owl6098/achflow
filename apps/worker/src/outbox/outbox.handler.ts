@@ -26,7 +26,7 @@ export class OutboxHandler {
     }
 
     const payload = this.parsePaymentReceivedPayload(event.payload);
-    await this.paymentValidation.validate(payload.paymentId);
+    await this.paymentValidation.validate(payload.paymentId, event.id);
 
     this.logger.log(
       JSON.stringify({

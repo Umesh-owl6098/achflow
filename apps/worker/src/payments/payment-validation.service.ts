@@ -17,15 +17,21 @@ export class PaymentValidationService {
 
   constructor(private readonly payments: PaymentLifecycleRepository) {}
 
-  async validate(paymentId: string): Promise<void> {
+  async validate(paymentId: string, outboxEventId: string): Promise<void> {
     const payment = await this.payments.findForValidation(paymentId);
 
     if (!payment) {
       throw new OutboxProcessingError('Payment not found for validation');
     }
 
-    const result = this.validatePayment(payment);
-    await this.payments.transitionFromReceived(payment.id, result);
+    const basicResult = this.validatePayment(payment);
+    const result =
+      basicResult.status === PaymentStatus.VALIDATED
+        ? await this.payments.reserveDailyUsageAndTransition(
+            payment,
+            outboxEventId,
+          )
+        : await this.transitionAndComplete(payment.id, basicResult);
 
     this.logger.log(
       JSON.stringify({
@@ -38,6 +44,16 @@ export class PaymentValidationService {
         validationCode: result.code,
       }),
     );
+  }
+
+  private async transitionAndComplete(
+    paymentId: string,
+    result: ValidationResult,
+  ): Promise<ValidationResult> {
+    await this.payments.transitionFromReceived(paymentId, result);
+    // Non-daily terminal results retain the existing lifecycle transition path.
+    // The outbox polling service completes their claimed event immediately after this returns.
+    return result;
   }
 
   private validatePayment(payment: PaymentForValidation): ValidationResult {

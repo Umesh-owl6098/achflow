@@ -43,18 +43,33 @@ enum MerchantStatus {
 }
 
 model Merchant {
-  id               String         @id @default(uuid())
-  merchantCode     String         @unique
+  id               String               @id @default(uuid())
+  merchantCode     String               @unique
   legalName        String
   displayName      String
-  status           MerchantStatus @default(ACTIVE)
-  allowAchDebit    Boolean        @default(false)
-  allowAchCredit   Boolean        @default(false)
+  status           MerchantStatus       @default(ACTIVE)
+  allowAchDebit    Boolean              @default(false)
+  allowAchCredit   Boolean              @default(false)
   perPaymentLimit  BigInt
   dailyAmountLimit BigInt
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
   payments         Payment[]
+  dailyUsage       MerchantDailyUsage[]
+}
+
+model MerchantDailyUsage {
+  id             String   @id @default(uuid())
+  merchantId     String
+  businessDate   DateTime @db.Date
+  utilizedAmount BigInt   @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+
+  @@unique([merchantId, businessDate])
+  @@index([businessDate])
 }
 
 model Payment {
