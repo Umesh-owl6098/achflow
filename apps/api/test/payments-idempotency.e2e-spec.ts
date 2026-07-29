@@ -5,7 +5,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { CreatePaymentDto } from '../src/payments/dto/create-payment.dto';
-import { SerializedPayment } from '../src/payments/payment.mapper';
+import { PaymentResponseDto } from '../src/payments/dto/payment-response.dto';
 import { PaymentsService } from '../src/payments/payments.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -65,11 +65,12 @@ describe('Payments idempotency (integration)', () => {
       .send(paymentPayload)
       .expect(201);
 
-    const body = response.body as SerializedPayment;
+    const body = response.body as PaymentResponseDto;
 
     expect(body.id).toBeDefined();
     expect(body.idempotencyKey).toBe(paymentPayload.idempotencyKey);
     expect(body.amountCents).toBe('5000');
+    expect(body).not.toHaveProperty('requestFingerprint');
 
     const count = await prisma.payment.count();
     expect(count).toBe(1);
@@ -86,14 +87,33 @@ describe('Payments idempotency (integration)', () => {
       .send(paymentPayload)
       .expect(200);
 
-    const firstBody = first.body as SerializedPayment;
-    const secondBody = second.body as SerializedPayment;
+    const firstBody = first.body as PaymentResponseDto;
+    const secondBody = second.body as PaymentResponseDto;
 
     expect(secondBody.id).toBe(firstBody.id);
     expect(secondBody.createdAt).toBe(firstBody.createdAt);
+    expect(secondBody).not.toHaveProperty('requestFingerprint');
 
     const count = await prisma.payment.count();
     expect(count).toBe(1);
+  });
+
+  it('does not expose the request fingerprint when retrieving a payment', async () => {
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .send(paymentPayload)
+      .expect(201);
+    const createdBody = created.body as PaymentResponseDto;
+
+    const response = await request(app.getHttpServer())
+      .get(`/api/v1/payments/${createdBody.id}`)
+      .expect(200);
+
+    const body = response.body as PaymentResponseDto;
+
+    expect(body.id).toBe(createdBody.id);
+    expect(body.amountCents).toBe('5000');
+    expect(body).not.toHaveProperty('requestFingerprint');
   });
 
   it('returns 409 when the same key is reused with a different payload', async () => {

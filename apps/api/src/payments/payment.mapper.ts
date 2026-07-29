@@ -1,10 +1,9 @@
 import { Payment } from '@prisma/client';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { PaymentResponseDto } from './dto/payment-response.dto';
 import { CreatePaymentRecord } from './payments.repository';
 
-export type SerializedPayment = Omit<Payment, 'amountCents'> & {
-  amountCents: string;
-};
+export type SerializedPayment = PaymentResponseDto;
 
 export function mapCreatePaymentDtoToRecord(
   dto: CreatePaymentDto,
@@ -27,7 +26,21 @@ export function mapCreatePaymentDtoToRecord(
 
 export function serializePayment(payment: Payment): SerializedPayment {
   return {
-    ...payment,
+    id: payment.id,
+    idempotencyKey: payment.idempotencyKey,
+    externalReference: payment.externalReference,
+    direction: payment.direction,
+    status: payment.status,
     amountCents: payment.amountCents.toString(),
+    currency: payment.currency,
+    originatorName: payment.originatorName,
+    receiverName: payment.receiverName,
+    receiverAccountRef: payment.receiverAccountRef,
+    routingNumber: payment.routingNumber,
+    description: payment.description,
+    failureCode: payment.failureCode,
+    failureReason: payment.failureReason,
+    createdAt: payment.createdAt,
+    updatedAt: payment.updatedAt,
   };
 }

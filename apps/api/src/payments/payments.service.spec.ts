@@ -135,6 +135,7 @@ describe('PaymentsService', () => {
     expect(result.created).toBe(true);
     expect(result.payment.id).toBe('pay-1');
     expect(result.payment.amountCents).toBe('2500');
+    expect(result.payment).not.toHaveProperty('requestFingerprint');
   });
 
   it('returns the original payment for a repeated identical request', async () => {
@@ -153,6 +154,17 @@ describe('PaymentsService', () => {
     );
     expect(result.created).toBe(false);
     expect(result.payment.id).toBe('pay-1');
+    expect(result.payment).not.toHaveProperty('requestFingerprint');
+  });
+
+  it('does not expose the request fingerprint when retrieving a payment', async () => {
+    repository.findById.mockResolvedValue(paymentRecord);
+
+    const payment = await service.findOne('pay-1');
+
+    expect(payment.id).toBe('pay-1');
+    expect(payment.amountCents).toBe('2500');
+    expect(payment).not.toHaveProperty('requestFingerprint');
   });
 
   it('returns 409 when the same key is reused with a different payload', async () => {

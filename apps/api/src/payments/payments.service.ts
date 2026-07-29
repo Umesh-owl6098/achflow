@@ -8,12 +8,12 @@ import { buildPaymentRequestFingerprint } from './payment-fingerprint.util';
 import {
   mapCreatePaymentDtoToRecord,
   serializePayment,
-  SerializedPayment,
 } from './payment.mapper';
+import { PaymentResponseDto } from './dto/payment-response.dto';
 import { PaymentsRepository } from './payments.repository';
 
 export type CreatePaymentResult = {
-  payment: SerializedPayment;
+  payment: PaymentResponseDto;
   created: boolean;
 };
 
@@ -44,7 +44,7 @@ export class PaymentsService {
     }
   }
 
-  async findOne(id: string): Promise<SerializedPayment> {
+  async findOne(id: string): Promise<PaymentResponseDto> {
     const payment = await this.paymentsRepository.findById(id);
 
     if (!payment) {
