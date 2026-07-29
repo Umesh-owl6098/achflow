@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: achflow-postgres
+    environment:
+      POSTGRES_USER: achflow
+      POSTGRES_PASSWORD: achflow
+      POSTGRES_DB: achflow
+    ports:
+      - "5435:5432"
+    volumes:
+      - achflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U achflow -d achflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  achflow_postgres_data:
