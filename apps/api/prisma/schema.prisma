@@ -24,6 +24,17 @@ enum PaymentStatus {
   UNKNOWN
 }
 
+enum OutboxEventType {
+  PAYMENT_RECEIVED
+}
+
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
 model Payment {
   id                 String           @id @default(uuid())
   idempotencyKey     String           @unique
@@ -45,4 +56,22 @@ model Payment {
 
   @@index([status])
   @@index([createdAt])
+}
+
+model OutboxEvent {
+  id            String            @id @default(uuid())
+  eventType     OutboxEventType
+  aggregateType String
+  aggregateId   String
+  payload       Json
+  status        OutboxEventStatus @default(PENDING)
+  attempts      Int               @default(0)
+  availableAt   DateTime          @default(now())
+  processedAt   DateTime?
+  lastError     String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([status, availableAt])
+  @@index([aggregateType, aggregateId])
 }

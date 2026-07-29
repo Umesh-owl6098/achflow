@@ -1,4 +1,4 @@
-import { PaymentDirection } from '@prisma/client';
+import { OutboxEventType, PaymentDirection } from '@prisma/client';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
@@ -47,6 +47,7 @@ describe('Payments idempotency (integration)', () => {
   });
 
   beforeEach(async () => {
+    await prisma.outboxEvent.deleteMany();
     await prisma.payment.deleteMany();
   });
 
@@ -54,7 +55,7 @@ describe('Payments idempotency (integration)', () => {
     await app.close();
   });
 
-  it('creates a payment on the first request', async () => {
+  it('creates a payment and PAYMENT_RECEIVED outbox event atomically', async () => {
     const response = await request(app.getHttpServer())
       .post('/api/v1/payments')
       .send(paymentPayload)
@@ -69,6 +70,31 @@ describe('Payments idempotency (integration)', () => {
 
     const count = await prisma.payment.count();
     expect(count).toBe(1);
+
+    const outboxEvents = await prisma.outboxEvent.findMany();
+    expect(outboxEvents).toHaveLength(1);
+    expect(outboxEvents[0]).toMatchObject({
+      eventType: OutboxEventType.PAYMENT_RECEIVED,
+      aggregateType: 'PAYMENT',
+      aggregateId: body.id,
+    });
+    expect(outboxEvents[0].payload).toEqual({
+      paymentId: body.id,
+      externalReference: null,
+      direction: paymentPayload.direction,
+      amountCents: '5000',
+      currency: paymentPayload.currency,
+      createdAt: body.createdAt,
+    });
+    expect(JSON.stringify(outboxEvents[0].payload)).not.toContain(
+      'requestFingerprint',
+    );
+    expect(JSON.stringify(outboxEvents[0].payload)).not.toContain(
+      'routingNumber',
+    );
+    expect(JSON.stringify(outboxEvents[0].payload)).not.toContain(
+      'receiverAccountRef',
+    );
   });
 
   it('returns the original payment for a repeated identical request', async () => {
@@ -91,6 +117,7 @@ describe('Payments idempotency (integration)', () => {
 
     const count = await prisma.payment.count();
     expect(count).toBe(1);
+    expect(await prisma.outboxEvent.count()).toBe(1);
   });
 
   it('does not expose the request fingerprint when retrieving a payment', async () => {
@@ -151,5 +178,6 @@ describe('Payments idempotency (integration)', () => {
       where: { idempotencyKey: 'concurrent-idem-key' },
     });
     expect(count).toBe(1);
+    expect(await prisma.outboxEvent.count()).toBe(1);
   });
 });

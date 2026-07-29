@@ -28,7 +28,7 @@ export class PaymentsService {
     const data = mapCreatePaymentDtoToRecord(dto, requestFingerprint);
 
     try {
-      const payment = await this.paymentsRepository.create(data);
+      const payment = await this.paymentsRepository.createWithOutbox(data);
 
       return {
         payment: serializePayment(payment),

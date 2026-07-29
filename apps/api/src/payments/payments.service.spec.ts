@@ -59,7 +59,7 @@ describe('buildPaymentRequestFingerprint', () => {
 describe('PaymentsService', () => {
   let service: PaymentsService;
   let repository: {
-    create: jest.Mock;
+    createWithOutbox: jest.Mock;
     findByIdempotencyKey: jest.Mock;
     findById: jest.Mock;
     isUniqueConstraintViolation: jest.Mock;
@@ -100,7 +100,7 @@ describe('PaymentsService', () => {
 
   beforeEach(async () => {
     repository = {
-      create: jest.fn(),
+      createWithOutbox: jest.fn(),
       findByIdempotencyKey: jest.fn(),
       findById: jest.fn(),
       isUniqueConstraintViolation: jest.fn(
@@ -124,11 +124,11 @@ describe('PaymentsService', () => {
   });
 
   it('creates a payment on the first request', async () => {
-    repository.create.mockResolvedValue(paymentRecord);
+    repository.createWithOutbox.mockResolvedValue(paymentRecord);
 
     const result = await service.create(dto);
 
-    expect(repository.create).toHaveBeenCalledWith(
+    expect(repository.createWithOutbox).toHaveBeenCalledWith(
       expect.objectContaining({
         idempotencyKey: dto.idempotencyKey,
         requestFingerprint: fingerprint,
@@ -142,7 +142,7 @@ describe('PaymentsService', () => {
   });
 
   it('returns the original payment for a repeated identical request', async () => {
-    repository.create.mockRejectedValue(
+    repository.createWithOutbox.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
@@ -161,7 +161,7 @@ describe('PaymentsService', () => {
   });
 
   it('returns the original payment when it becomes visible after retries', async () => {
-    repository.create.mockRejectedValue(
+    repository.createWithOutbox.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
@@ -190,7 +190,7 @@ describe('PaymentsService', () => {
   });
 
   it('returns 409 when the same key is reused with a different payload', async () => {
-    repository.create.mockRejectedValue(
+    repository.createWithOutbox.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
@@ -210,7 +210,7 @@ describe('PaymentsService', () => {
   });
 
   it('returns an internal error when a payment never becomes visible after P2002', async () => {
-    repository.create.mockRejectedValue(
+    repository.createWithOutbox.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
