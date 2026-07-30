@@ -48,6 +48,9 @@ export function serializePayment(
     description: payment.description,
     failureCode: payment.failureCode,
     failureReason: payment.failureReason,
+    validationCode: payment.validationCode,
+    validationMessage: payment.validationMessage,
+    validatedAt: payment.validatedAt,
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
   };

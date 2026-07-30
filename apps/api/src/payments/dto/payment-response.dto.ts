@@ -18,6 +18,9 @@ export class PaymentResponseDto {
   description!: string | null;
   failureCode!: string | null;
   failureReason!: string | null;
+  validationCode!: string | null;
+  validationMessage!: string | null;
+  validatedAt!: Date | null;
   createdAt!: Date;
   updatedAt!: Date;
 }

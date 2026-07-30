@@ -1,9 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   MerchantStatus,
+  FundingAccountStatus,
+  LedgerEntryType,
   PaymentDirection,
   PaymentStatus,
   Prisma,
+  ReservationStatus,
 } from '@prisma/client';
 import { OutboxProcessingError } from '../outbox/outbox-processing.error';
 import { WorkerPrismaService } from '../worker-prisma.service';
@@ -35,8 +38,16 @@ export type ValidationResult = {
   message: string | null;
 };
 
+export type BankSettlementEvent = {
+  bankEventId: string;
+  paymentId: string;
+  eventType: 'SETTLED';
+  eventTimestamp: Date;
+};
+
 @Injectable()
 export class PaymentLifecycleRepository {
+  private readonly logger = new Logger(PaymentLifecycleRepository.name);
   constructor(private readonly prisma: WorkerPrismaService) {}
 
   findForValidation(id: string): Promise<PaymentForValidation | null> {
@@ -98,6 +109,175 @@ export class PaymentLifecycleRepository {
     throw new OutboxProcessingError('Payment is not eligible for validation');
   }
 
+  async releaseReservationForPayment(paymentId: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${paymentId}, 0))`,
+      );
+
+      const reservation = await transaction.reservation.findUnique({
+        where: { paymentId },
+      });
+      if (!reservation) {
+        throw new OutboxProcessingError('Reservation not found for payment');
+      }
+
+      if (reservation.status === ReservationStatus.RELEASED) {
+        return reservation;
+      }
+
+      const released = await transaction.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          status: ReservationStatus.RELEASED,
+          releasedAt: new Date(),
+        },
+      });
+      await transaction.ledgerEntry.create({
+        data: {
+          entryKey: `reservation-release:${paymentId}`,
+          fundingAccountId: released.fundingAccountId,
+          paymentId: released.paymentId,
+          entryType: LedgerEntryType.RESERVATION_RELEASE,
+          amount: released.amount,
+        },
+      });
+
+      return released;
+    });
+  }
+
+  async settleReservationForPayment(paymentId: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${paymentId}, 0))`,
+      );
+
+      const reservation = await transaction.reservation.findUnique({
+        where: { paymentId },
+      });
+      if (!reservation) {
+        throw new OutboxProcessingError('Reservation not found for payment');
+      }
+      if (reservation.status === ReservationStatus.SETTLED) {
+        return reservation;
+      }
+      if (reservation.status !== ReservationStatus.ACTIVE) {
+        throw new OutboxProcessingError('Reservation is not active for settlement');
+      }
+
+      const settled = await transaction.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          status: ReservationStatus.SETTLED,
+          settledAt: new Date(),
+        },
+      });
+      const paymentUpdate = await transaction.payment.updateMany({
+        where: { id: paymentId, status: PaymentStatus.VALIDATED },
+        data: { status: PaymentStatus.SETTLED },
+      });
+      if (paymentUpdate.count !== 1) {
+        throw new OutboxProcessingError('Payment is not validated for settlement');
+      }
+      await transaction.ledgerEntry.create({
+        data: {
+          entryKey: `settlement:${paymentId}`,
+          fundingAccountId: settled.fundingAccountId,
+          paymentId: settled.paymentId,
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: settled.amount,
+        },
+      });
+
+      return settled;
+    });
+  }
+
+  async returnSettlementForPayment(paymentId: string, returnCode: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${paymentId}, 0))`,
+      );
+
+      const reservation = await transaction.reservation.findUnique({
+        where: { paymentId },
+      });
+      if (!reservation) {
+        throw new OutboxProcessingError('Reservation not found for payment');
+      }
+      if (reservation.status === ReservationStatus.RETURNED) {
+        return reservation;
+      }
+      if (reservation.status !== ReservationStatus.SETTLED) {
+        throw new OutboxProcessingError('Reservation is not settled for return');
+      }
+
+      const returned = await transaction.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          status: ReservationStatus.RETURNED,
+          returnedAt: new Date(),
+          returnCode,
+        },
+      });
+      const paymentUpdate = await transaction.payment.updateMany({
+        where: {
+          id: paymentId,
+          status: { in: [PaymentStatus.SETTLED, PaymentStatus.VALIDATED] },
+        },
+        data: { status: PaymentStatus.RETURNED },
+      });
+      if (paymentUpdate.count !== 1) {
+        throw new OutboxProcessingError('Payment is not settled for return');
+      }
+      await transaction.ledgerEntry.create({
+        data: {
+          entryKey: `return:${paymentId}`,
+          fundingAccountId: returned.fundingAccountId,
+          paymentId: returned.paymentId,
+          entryType: LedgerEntryType.RETURN,
+          amount: returned.amount,
+        },
+      });
+
+      return returned;
+    });
+  }
+
+  async processBankSettlementEvent(event: BankSettlementEvent) {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${event.bankEventId}, 0))`,
+      );
+      const existing = await transaction.processedBankEvent.findUnique({
+        where: { bankEventId: event.bankEventId },
+      });
+      if (existing) {
+        return existing;
+      }
+      const payment = await transaction.payment.findUnique({
+        where: { id: event.paymentId },
+        select: { id: true, status: true },
+      });
+      if (!payment) {
+        throw new OutboxProcessingError('Payment not found for bank settlement event');
+      }
+      if (
+        event.eventType !== 'SETTLED' ||
+        (payment.status !== PaymentStatus.SETTLED &&
+          payment.status !== PaymentStatus.RETURNED)
+      ) {
+        throw new OutboxProcessingError('Payment is not settled for bank settlement event');
+      }
+      const processedEvent = await transaction.processedBankEvent.create({
+        data: event,
+      });
+      await this.afterBankSettlementEventPersisted();
+      return processedEvent;
+    });
+  }
+
   async reserveDailyUsageAndTransition(
     payment: PaymentForValidation,
     outboxEventId: string,
@@ -106,9 +286,11 @@ export class PaymentLifecycleRepository {
     const lockKey = `${payment.merchantId ?? ''}:${businessDate.toISOString()}`;
 
     return this.prisma.$transaction(async (transaction) => {
+      this.developmentLog('transaction.started', payment.id);
       await transaction.$executeRaw(
         Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
       );
+      this.developmentLog('daily_lock.acquired', payment.id);
 
       const current = await transaction.payment.findUnique({
         where: { id: payment.id },
@@ -138,9 +320,10 @@ export class PaymentLifecycleRepository {
           },
         },
       });
+      this.developmentLog('daily_usage.loaded', payment.id);
       const utilizedAmount = usage?.utilizedAmount ?? BigInt(0);
       const nextAmount = utilizedAmount + payment.amountCents;
-      const result =
+      let result =
         nextAmount > payment.merchant.dailyAmountLimit
           ? this.dailyLimitFailure(
               payment.merchant.dailyAmountLimit,
@@ -148,6 +331,32 @@ export class PaymentLifecycleRepository {
               payment.amountCents,
             )
           : { status: PaymentStatus.VALIDATED, code: null, message: null };
+
+      if (result.status === PaymentStatus.VALIDATED && payment.direction === PaymentDirection.CREDIT) {
+        const account = await transaction.fundingAccount.findUnique({ where: { merchantId_currency: { merchantId: payment.merchantId, currency: payment.currency } } });
+        this.developmentLog('funding_account.loaded', payment.id, { found: Boolean(account) });
+        if (!account || account.status !== FundingAccountStatus.ACTIVE) {
+          result = this.failed(
+            'FUNDING_ACCOUNT_UNAVAILABLE',
+            `No active ${payment.currency} funding account exists for merchant`,
+          );
+        } else {
+          await transaction.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${account.id}, 0))`);
+          this.developmentLog('funding_lock.acquired', payment.id);
+          const entries = await transaction.$queryRaw<{ total: bigint | null }[]>(Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${account.id}`);
+          const reserved = await transaction.reservation.aggregate({ where: { fundingAccountId: account.id, status: 'ACTIVE' }, _sum: { amount: true } });
+          const postedBalance = BigInt(entries[0]?.total ?? 0);
+          const available = postedBalance - (reserved._sum.amount ?? BigInt(0));
+          this.developmentLog('funding.balance.calculated', payment.id, { postedBalance: postedBalance.toString(), activeReservations: (reserved._sum.amount ?? BigInt(0)).toString(), available: available.toString() });
+          if (available < payment.amountCents) result = this.failed('INSUFFICIENT_FUNDS', `Available ${available}, requested ${payment.amountCents}, currency ${payment.currency}`);
+          else {
+            await transaction.reservation.create({ data: { paymentId: payment.id, fundingAccountId: account.id, amount: payment.amountCents } });
+            this.developmentLog('reservation.inserted', payment.id);
+            await transaction.ledgerEntry.create({ data: { entryKey: `reservation:${payment.id}`, fundingAccountId: account.id, paymentId: payment.id, entryType: LedgerEntryType.RESERVATION, amount: payment.amountCents } });
+            this.developmentLog('ledger_entry.inserted', payment.id);
+          }
+        }
+      }
 
       if (result.status === PaymentStatus.VALIDATED) {
         if (usage) {
@@ -166,14 +375,31 @@ export class PaymentLifecycleRepository {
         }
       }
 
+      if (result.status === PaymentStatus.VALIDATED) {
+        await this.afterFinancialWrites();
+      }
+
       await transaction.payment.updateMany({
         where: { id: payment.id, status: PaymentStatus.RECEIVED },
         data: this.transitionData(result),
       });
       await this.completeOutbox(transaction, outboxEventId);
+      this.developmentLog('outbox.completed', payment.id);
       return result;
     });
   }
+
+  private developmentLog(checkpoint: string, paymentId: string, details: Record<string, unknown> = {}): void {
+    if (process.env.NODE_ENV !== 'production') this.logger.debug(JSON.stringify({ event: 'ledger.reservation', checkpoint, paymentId, ...details }));
+  }
+
+  // Deliberate no-op seam used only by rollback integration tests. It runs
+  // inside the transaction so a test can verify PostgreSQL atomicity.
+  protected async afterFinancialWrites(): Promise<void> {}
+
+  // Deliberate no-op seam used only by reconciliation rollback integration
+  // tests. It runs after insertion and before the transaction commits.
+  protected async afterBankSettlementEventPersisted(): Promise<void> {}
 
   private async completeOutbox(
     transaction: Prisma.TransactionClient,
@@ -214,6 +440,10 @@ export class PaymentLifecycleRepository {
     };
   }
 
+  private failed(code: string, message: string): ValidationResult {
+    return { status: PaymentStatus.VALIDATION_FAILED, code, message };
+  }
+
   private transitionData(
     result: ValidationResult,
   ): Prisma.PaymentUpdateManyMutationInput {
@@ -223,7 +453,8 @@ export class PaymentLifecycleRepository {
       validationMessage: result.message,
       failureCode: result.code,
       failureReason: result.message,
-      validatedAt: new Date(),
+      validatedAt:
+        result.status === PaymentStatus.VALIDATED ? new Date() : null,
     };
   }
 }

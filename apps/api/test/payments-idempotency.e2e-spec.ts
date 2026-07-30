@@ -1,4 +1,6 @@
 import {
+  FundingAccountStatus,
+  LedgerEntryType,
   MerchantStatus,
   OutboxEventType,
   PaymentDirection,
@@ -52,8 +54,12 @@ describe('Payments idempotency (integration)', () => {
 
   beforeEach(async () => {
     await prisma.outboxEvent.deleteMany();
-    await prisma.payment.deleteMany();
+    await prisma.reservation.deleteMany();
+    await prisma.ledgerEntry.deleteMany();
+    await prisma.processedBankEvent.deleteMany();
     await prisma.merchantDailyUsage.deleteMany();
+    await prisma.payment.deleteMany();
+    await prisma.fundingAccount.deleteMany();
     await prisma.merchant.deleteMany();
     await prisma.merchant.createMany({
       data: [
@@ -232,5 +238,74 @@ describe('Payments idempotency (integration)', () => {
     });
     expect(count).toBe(1);
     expect(await prisma.outboxEvent.count()).toBe(1);
+  });
+
+  it('exposes the payment lifecycle through REST endpoints', async () => {
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_BOTH' },
+    });
+    const fundingAccount = await prisma.fundingAccount.create({
+      data: {
+        merchantId: merchant.id,
+        currency: 'USD',
+        status: FundingAccountStatus.ACTIVE,
+      },
+    });
+    await prisma.ledgerEntry.create({
+      data: {
+        entryKey: 'initial-credit:api-lifecycle',
+        fundingAccountId: fundingAccount.id,
+        entryType: LedgerEntryType.INITIAL_CREDIT,
+        amount: BigInt(10_000),
+      },
+    });
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .send({
+        ...paymentPayload,
+        idempotencyKey: 'api-lifecycle-idempotency-key',
+        externalReference: 'api-lifecycle-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: 4000,
+      })
+      .expect(201);
+    const paymentId = (created.body as PaymentResponseDto).id;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/payments/${paymentId}/validate`)
+      .expect(201)
+      .expect(({ body }) => expect(body.status).toBe('VALIDATED'));
+    await request(app.getHttpServer())
+      .post(`/api/v1/payments/${paymentId}/reserve`)
+      .expect(201)
+      .expect(({ body }) => expect(body.status).toBe('ACTIVE'));
+    await request(app.getHttpServer())
+      .post(`/api/v1/payments/${paymentId}/settle`)
+      .expect(201)
+      .expect(({ body }) => expect(body.status).toBe('SETTLED'));
+    await request(app.getHttpServer())
+      .post(`/api/v1/payments/${paymentId}/return`)
+      .send({ returnCode: 'R01' })
+      .expect(201)
+      .expect(({ body }) => expect(body.status).toBe('RETURNED'));
+
+    const details = await request(app.getHttpServer())
+      .get(`/api/v1/payments/${paymentId}`)
+      .expect(200);
+
+    expect(details.body).toMatchObject({
+      id: paymentId,
+      status: 'RETURNED',
+      payment: { id: paymentId, status: 'RETURNED' },
+      reservation: { status: 'RETURNED', returnCode: 'R01' },
+      fundingAccount: { id: fundingAccount.id, currency: 'USD' },
+      ledgerSummary: {
+        postedBalance: '14000',
+        activeReservedAmount: '0',
+        availableBalance: '14000',
+      },
+    });
+    expect(details.body).not.toHaveProperty('requestFingerprint');
+    expect(details.body.payment).not.toHaveProperty('requestFingerprint');
   });
 });

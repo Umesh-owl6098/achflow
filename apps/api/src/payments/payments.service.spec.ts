@@ -8,6 +8,7 @@ import { CreatePaymentDto } from './dto/create-payment.dto';
 import { buildPaymentRequestFingerprint } from './payment-fingerprint.util';
 import { PaymentsRepository } from './payments.repository';
 import { PaymentsService } from './payments.service';
+import { PaymentEngineService } from './payment-engine.service';
 import { MerchantsRepository } from './merchants.repository';
 
 const merchant = { id: 'merchant-1', merchantCode: 'TEST_BOTH' };
@@ -135,6 +136,16 @@ describe('PaymentsService', () => {
           useValue: repository,
         },
         { provide: MerchantsRepository, useValue: merchantsRepository },
+        {
+          provide: PaymentEngineService,
+          useValue: {
+            validate: jest.fn(),
+            reserve: jest.fn(),
+            settle: jest.fn(),
+            returnSettlement: jest.fn(),
+            details: jest.fn(),
+          },
+        },
       ],
     }).compile();
 

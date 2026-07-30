@@ -42,6 +42,30 @@ enum MerchantStatus {
   CLOSED
 }
 
+enum FundingAccountStatus {
+  ACTIVE
+  CLOSED
+}
+
+enum LedgerEntryType {
+  INITIAL_CREDIT
+  RESERVATION
+  RESERVATION_RELEASE
+  SETTLEMENT
+  DEBIT_POSTED
+  CREDIT_POSTED
+  RETURN
+  REVERSAL
+  ADJUSTMENT
+}
+
+enum ReservationStatus {
+  ACTIVE
+  RELEASED
+  SETTLED
+  RETURNED
+}
+
 model Merchant {
   id               String               @id @default(uuid())
   merchantCode     String               @unique
@@ -56,6 +80,51 @@ model Merchant {
   updatedAt        DateTime             @updatedAt
   payments         Payment[]
   dailyUsage       MerchantDailyUsage[]
+  fundingAccounts  FundingAccount[]
+}
+
+model FundingAccount {
+  id           String               @id @default(uuid())
+  merchantId   String
+  currency     String               @default("USD")
+  status       FundingAccountStatus @default(ACTIVE)
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  merchant     Merchant             @relation(fields: [merchantId], references: [id])
+  entries      LedgerEntry[]
+  reservations Reservation[]
+
+  @@unique([merchantId, currency])
+}
+
+model LedgerEntry {
+  id               String          @id @default(uuid())
+  entryKey         String          @unique
+  fundingAccountId String
+  paymentId        String?
+  entryType        LedgerEntryType
+  amount           BigInt
+  createdAt        DateTime        @default(now())
+  fundingAccount   FundingAccount  @relation(fields: [fundingAccountId], references: [id])
+
+  @@index([fundingAccountId, createdAt])
+  @@index([paymentId])
+}
+
+model Reservation {
+  id               String            @id @default(uuid())
+  paymentId        String            @unique
+  fundingAccountId String
+  amount           BigInt
+  status           ReservationStatus @default(ACTIVE)
+  createdAt        DateTime          @default(now())
+  releasedAt       DateTime?
+  settledAt        DateTime?
+  returnedAt       DateTime?
+  returnCode       String?
+  fundingAccount   FundingAccount    @relation(fields: [fundingAccountId], references: [id])
+
+  @@index([fundingAccountId, status])
 }
 
 model MerchantDailyUsage {
@@ -95,10 +164,25 @@ model Payment {
   updatedAt          DateTime         @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id])
+  bankSettlementEvents ProcessedBankEvent[]
 
   @@index([status])
   @@index([createdAt])
   @@index([merchantId])
+}
+
+model ProcessedBankEvent {
+  id             String   @id @default(uuid())
+  bankEventId    String   @unique
+  paymentId      String
+  eventType      String
+  eventTimestamp DateTime
+  processedAt    DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
 }
 
 model OutboxEvent {

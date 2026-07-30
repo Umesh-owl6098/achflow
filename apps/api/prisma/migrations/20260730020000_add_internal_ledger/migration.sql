@@ -1,0 +1,13 @@
+CREATE TYPE "FundingAccountStatus" AS ENUM ('ACTIVE', 'CLOSED');
+CREATE TYPE "LedgerEntryType" AS ENUM ('INITIAL_CREDIT', 'RESERVATION', 'RESERVATION_RELEASE', 'DEBIT_POSTED', 'CREDIT_POSTED', 'RETURN', 'REVERSAL', 'ADJUSTMENT');
+CREATE TYPE "ReservationStatus" AS ENUM ('ACTIVE', 'RELEASED');
+CREATE TABLE "FundingAccount" ("id" TEXT NOT NULL, "merchantId" TEXT NOT NULL, "currency" TEXT NOT NULL DEFAULT 'USD', "status" "FundingAccountStatus" NOT NULL DEFAULT 'ACTIVE', "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP(3) NOT NULL, CONSTRAINT "FundingAccount_pkey" PRIMARY KEY ("id"));
+CREATE UNIQUE INDEX "FundingAccount_merchantId_currency_key" ON "FundingAccount"("merchantId", "currency");
+ALTER TABLE "FundingAccount" ADD CONSTRAINT "FundingAccount_merchantId_fkey" FOREIGN KEY ("merchantId") REFERENCES "Merchant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+CREATE TABLE "LedgerEntry" ("id" TEXT NOT NULL, "entryKey" TEXT NOT NULL, "fundingAccountId" TEXT NOT NULL, "paymentId" TEXT, "entryType" "LedgerEntryType" NOT NULL, "amount" BIGINT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT "LedgerEntry_pkey" PRIMARY KEY ("id"));
+CREATE UNIQUE INDEX "LedgerEntry_entryKey_key" ON "LedgerEntry"("entryKey");
+CREATE INDEX "LedgerEntry_fundingAccountId_createdAt_idx" ON "LedgerEntry"("fundingAccountId", "createdAt"); CREATE INDEX "LedgerEntry_paymentId_idx" ON "LedgerEntry"("paymentId");
+ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_fundingAccountId_fkey" FOREIGN KEY ("fundingAccountId") REFERENCES "FundingAccount"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+CREATE TABLE "Reservation" ("id" TEXT NOT NULL, "paymentId" TEXT NOT NULL, "fundingAccountId" TEXT NOT NULL, "amount" BIGINT NOT NULL, "status" "ReservationStatus" NOT NULL DEFAULT 'ACTIVE', "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "releasedAt" TIMESTAMP(3), CONSTRAINT "Reservation_pkey" PRIMARY KEY ("id"));
+CREATE UNIQUE INDEX "Reservation_paymentId_key" ON "Reservation"("paymentId"); CREATE INDEX "Reservation_fundingAccountId_status_idx" ON "Reservation"("fundingAccountId", "status");
+ALTER TABLE "Reservation" ADD CONSTRAINT "Reservation_fundingAccountId_fkey" FOREIGN KEY ("fundingAccountId") REFERENCES "FundingAccount"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { ReturnPaymentDto } from './dto/return-payment.dto';
 import { PaymentsService } from './payments.service';
 
 @Controller('api/v1/payments')
@@ -27,8 +28,31 @@ export class PaymentsController {
     return payment;
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.paymentsService.findOne(id);
+  @Post(':paymentId/validate')
+  validate(@Param('paymentId') paymentId: string) {
+    return this.paymentsService.validate(paymentId);
+  }
+
+  @Post(':paymentId/reserve')
+  reserve(@Param('paymentId') paymentId: string) {
+    return this.paymentsService.reserve(paymentId);
+  }
+
+  @Post(':paymentId/settle')
+  settle(@Param('paymentId') paymentId: string) {
+    return this.paymentsService.settle(paymentId);
+  }
+
+  @Post(':paymentId/return')
+  returnSettlement(
+    @Param('paymentId') paymentId: string,
+    @Body() dto: ReturnPaymentDto,
+  ) {
+    return this.paymentsService.returnSettlement(paymentId, dto.returnCode);
+  }
+
+  @Get(':paymentId')
+  findOne(@Param('paymentId') paymentId: string) {
+    return this.paymentsService.details(paymentId);
   }
 }

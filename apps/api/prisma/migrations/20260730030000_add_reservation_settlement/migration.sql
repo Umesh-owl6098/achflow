@@ -1,0 +1,3 @@
+ALTER TYPE "LedgerEntryType" ADD VALUE 'SETTLEMENT';
+ALTER TYPE "ReservationStatus" ADD VALUE 'SETTLED';
+ALTER TABLE "Reservation" ADD COLUMN "settledAt" TIMESTAMP(3);

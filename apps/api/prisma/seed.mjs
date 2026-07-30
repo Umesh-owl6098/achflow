@@ -41,10 +41,20 @@ const merchants = [
 ];
 
 for (const merchant of merchants) {
-  await prisma.merchant.upsert({
+  const saved = await prisma.merchant.upsert({
     where: { merchantCode: merchant.merchantCode },
     create: merchant,
     update: merchant,
+  });
+  const account = await prisma.fundingAccount.upsert({
+    where: { merchantId_currency: { merchantId: saved.id, currency: 'USD' } },
+    create: { merchantId: saved.id, currency: 'USD' },
+    update: {},
+  });
+  await prisma.ledgerEntry.upsert({
+    where: { entryKey: `seed-initial-credit:${saved.merchantCode}:USD` },
+    create: { entryKey: `seed-initial-credit:${saved.merchantCode}:USD`, fundingAccountId: account.id, entryType: 'INITIAL_CREDIT', amount: 100000000n },
+    update: {},
   });
 }
 

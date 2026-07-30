@@ -14,6 +14,7 @@ import { PaymentResponseDto } from './dto/payment-response.dto';
 import { findPaymentWithVisibilityRetry } from './payment-visibility-retry.util';
 import { PaymentsRepository } from './payments.repository';
 import { MerchantsRepository } from './merchants.repository';
+import { PaymentEngineService } from './payment-engine.service';
 
 export type CreatePaymentResult = {
   payment: PaymentResponseDto;
@@ -25,6 +26,7 @@ export class PaymentsService {
   constructor(
     private readonly paymentsRepository: PaymentsRepository,
     private readonly merchantsRepository: MerchantsRepository,
+    private readonly paymentEngine: PaymentEngineService,
   ) {}
 
   async create(dto: CreatePaymentDto): Promise<CreatePaymentResult> {
@@ -72,6 +74,36 @@ export class PaymentsService {
     return serializePayment(payment);
   }
 
+  async validate(id: string) {
+    await this.paymentEngine.validate(id);
+    return this.findOne(id);
+  }
+
+  async reserve(id: string) {
+    return this.serializeReservation(await this.paymentEngine.reserve(id));
+  }
+
+  async settle(id: string) {
+    return this.serializeReservation(await this.paymentEngine.settle(id));
+  }
+
+  async returnSettlement(id: string, returnCode: string) {
+    return this.serializeReservation(
+      await this.paymentEngine.returnSettlement(id, returnCode),
+    );
+  }
+
+  async details(id: string) {
+    const details = await this.paymentEngine.details(id);
+    const payment = serializePayment(details.payment);
+    return {
+      ...details,
+      ...payment,
+      payment,
+      reservation: this.serializeReservation(details.reservation),
+    };
+  }
+
   private async handleIdempotencyConflict(
     idempotencyKey: string,
     requestFingerprint: string,
@@ -95,6 +127,30 @@ export class PaymentsService {
     return {
       payment: serializePayment(existingPayment),
       created: false,
+    };
+  }
+
+  private serializeReservation(
+    reservation: {
+      id: string;
+      paymentId: string;
+      fundingAccountId: string;
+      amount: bigint;
+      status: string;
+      createdAt: Date;
+      releasedAt: Date | null;
+      settledAt: Date | null;
+      returnedAt: Date | null;
+      returnCode: string | null;
+    } | null,
+  ) {
+    if (!reservation) {
+      return null;
+    }
+
+    return {
+      ...reservation,
+      amount: reservation.amount.toString(),
     };
   }
 }
