@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ACHFlow Working Demo</title>
+    <style>
+      body {
+        max-width: 1100px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #172033;
+        font:
+          16px system-ui,
+          sans-serif;
+      }
+      h1,
+      h2 {
+        color: #0f172a;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      td,
+      th {
+        border: 1px solid #cbd5e1;
+        padding: 0.55rem;
+        text-align: left;
+      }
+      img {
+        display: block;
+        width: 100%;
+        margin: 1rem 0 2rem;
+        border: 1px solid #cbd5e1;
+      }
+      .partial {
+        color: #92400e;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ACHFlow Working Demo</h1>
+    <p>
+      Evidence captured with Playwright Chromium from the running local
+      application.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Evidence</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Portal routes and BFF data</td>
+          <td>Passed</td>
+        </tr>
+        <tr>
+          <td>Admin and merchant authentication</td>
+          <td>Passed</td>
+        </tr>
+        <tr>
+          <td>PostgreSQL migrations</td>
+          <td>21 applied</td>
+        </tr>
+        <tr>
+          <td>Worker health</td>
+          <td class="partial">Unknown — no persisted heartbeat</td>
+        </tr>
+      </tbody>
+    </table>
+    <h2>Dashboard</h2>
+    <img src="demo-screenshots/01-dashboard.png" alt="ACHFlow dashboard" />
+    <h2>Payments</h2>
+    <img src="demo-screenshots/02-payments-list.png" alt="Payment list" />
+    <h2>Payment details</h2>
+    <img
+      src="demo-screenshots/03-payment-details-overview.png"
+      alt="Payment details"
+    />
+    <h2>Ledger</h2>
+    <img src="demo-screenshots/06-ledger.png" alt="Ledger" />
+    <h2>NACHA file details</h2>
+    <img
+      src="demo-screenshots/08-nacha-file-details.png"
+      alt="NACHA file details"
+    />
+    <h2>Webhook delivery</h2>
+    <img
+      src="demo-screenshots/10-webhook-delivery-events.png"
+      alt="Webhook delivery event"
+    />
+    <h2>Merchant details</h2>
+    <img
+      src="demo-screenshots/12-merchant-details.png"
+      alt="Merchant details"
+    />
+    <h2>Settings health</h2>
+    <img
+      src="demo-screenshots/13-settings-system-health.png"
+      alt="Settings health"
+    />
+    <h2>Simulator history</h2>
+    <img
+      src="demo-screenshots/17-simulator-run-history.png"
+      alt="Simulator run history"
+    />
+  </body>
+</html>

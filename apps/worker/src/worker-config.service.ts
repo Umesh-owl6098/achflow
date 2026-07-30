@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_BATCH_SIZE = 10;
@@ -12,8 +12,20 @@ export class WorkerConfigService {
   readonly batchSize: number;
   readonly maxAttempts: number;
   readonly claimLeaseMs: number;
+  readonly webhookMaxAttempts: number;
+  readonly webhookInitialRetrySeconds: number;
+  readonly webhookMaxRetrySeconds: number;
+  readonly webhookRequestTimeoutMs: number;
+  readonly webhookBatchSize: number;
+  readonly webhookClaimTimeoutSeconds: number;
+  readonly webhookWorkerId: string;
 
-  constructor(env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    @Optional()
+    @Inject('WORKER_ENV')
+    suppliedEnv?: NodeJS.ProcessEnv,
+  ) {
+    const env = suppliedEnv ?? process.env;
     this.databaseUrl = this.requireUrl(env.DATABASE_URL);
     this.pollIntervalMs = this.parsePositiveInteger(
       'OUTBOX_POLL_INTERVAL_MS',
@@ -35,6 +47,38 @@ export class WorkerConfigService {
       env.OUTBOX_CLAIM_LEASE_MS,
       DEFAULT_CLAIM_LEASE_MS,
     );
+    this.webhookMaxAttempts = this.parsePositiveInteger(
+      'WEBHOOK_MAX_ATTEMPTS',
+      env.WEBHOOK_MAX_ATTEMPTS,
+      5,
+    );
+    this.webhookInitialRetrySeconds = this.parsePositiveInteger(
+      'WEBHOOK_INITIAL_RETRY_SECONDS',
+      env.WEBHOOK_INITIAL_RETRY_SECONDS,
+      1,
+    );
+    this.webhookMaxRetrySeconds = this.parsePositiveInteger(
+      'WEBHOOK_MAX_RETRY_SECONDS',
+      env.WEBHOOK_MAX_RETRY_SECONDS,
+      60,
+    );
+    this.webhookRequestTimeoutMs = this.parsePositiveInteger(
+      'WEBHOOK_REQUEST_TIMEOUT_MS',
+      env.WEBHOOK_REQUEST_TIMEOUT_MS,
+      5_000,
+    );
+    this.webhookBatchSize = this.parsePositiveInteger(
+      'WEBHOOK_BATCH_SIZE',
+      env.WEBHOOK_BATCH_SIZE,
+      10,
+    );
+    this.webhookClaimTimeoutSeconds = this.parsePositiveInteger(
+      'WEBHOOK_CLAIM_TIMEOUT_SECONDS',
+      env.WEBHOOK_CLAIM_TIMEOUT_SECONDS,
+      30,
+    );
+    this.webhookWorkerId =
+      env.WEBHOOK_WORKER_ID?.trim() || 'achflow-webhook-worker';
   }
 
   private requireUrl(value: string | undefined): string {

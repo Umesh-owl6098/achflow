@@ -17,15 +17,23 @@ import { PaymentLifecycleRepository } from '../src/payments/payment-lifecycle.re
 import { PaymentValidationService } from '../src/payments/payment-validation.service';
 import { WorkerConfigService } from '../src/worker-config.service';
 import { WorkerPrismaService } from '../src/worker-prisma.service';
+import { WebhookDeliveryMaterializerService } from '../src/webhooks/webhook-delivery-materializer.service';
+import { WebhookDeliveryProcessorService } from '../src/webhooks/webhook-delivery-processor.service';
+import { MerchantWebhookEndpointsService } from '../../api/src/webhooks/merchant-webhook-endpoints.service';
+import { WebhookSecretCryptoService } from '../../api/src/webhooks/webhook-secret-crypto.service';
+import { createHash, createHmac } from 'crypto';
+import { createServer } from 'http';
+import { NachaFileGeneratorService } from '../src/ach/nacha-file-generator.service';
 
 function paymentPayload(paymentId: string) {
   return {
     paymentId,
-    externalReference: `${paymentId}-reference`,
+    merchantId: 'merchant-1',
+    paymentStatus: PaymentStatus.RECEIVED,
     direction: PaymentDirection.DEBIT,
     amountCents: '2500',
     currency: 'USD',
-    createdAt: '2026-07-29T12:00:00.000Z',
+    occurredAt: '2026-07-29T12:00:00.000Z',
   };
 }
 
@@ -67,13 +75,18 @@ describe('Outbox worker (integration)', () => {
   });
 
   beforeEach(async () => {
+    await prismaOne.webhookDelivery.deleteMany();
     await prismaOne.outboxEvent.deleteMany();
     await prismaOne.processedBankEvent.deleteMany();
     await prismaOne.reservation.deleteMany();
     await prismaOne.ledgerEntry.deleteMany();
     await prismaOne.merchantDailyUsage.deleteMany();
+    await prismaOne.paymentIdempotencyRecord.deleteMany();
     await prismaOne.payment.deleteMany();
+    await prismaOne.achFile.deleteMany();
     await prismaOne.fundingAccount.deleteMany();
+    await prismaOne.merchantApiKey.deleteMany();
+    await prismaOne.merchantWebhookEndpoint.deleteMany();
     await prismaOne.merchant.deleteMany();
     await prismaOne.merchant.create({
       data: {
@@ -89,12 +102,18 @@ describe('Outbox worker (integration)', () => {
       },
     });
     const fundingAccount = await prismaOne.fundingAccount.create({
-      data: { id: 'funding-account-1', merchantId: 'merchant-1', currency: 'USD' },
+      data: {
+        id: 'funding-account-1',
+        merchantId: 'merchant-1',
+        currency: 'USD',
+      },
     });
     await prismaOne.ledgerEntry.create({
       data: {
-        entryKey: 'initial-credit:merchant-1', fundingAccountId: fundingAccount.id,
-        entryType: 'INITIAL_CREDIT', amount: BigInt(100_000),
+        entryKey: 'initial-credit:merchant-1',
+        fundingAccountId: fundingAccount.id,
+        entryType: 'INITIAL_CREDIT',
+        amount: BigInt(100_000),
       },
     });
   });
@@ -171,11 +190,12 @@ describe('Outbox worker (integration)', () => {
         aggregateId: `pay-${index}`,
         payload: {
           paymentId: `pay-${index}`,
-          externalReference: null,
+          merchantId: 'merchant-1',
+          paymentStatus: PaymentStatus.RECEIVED,
           direction: PaymentDirection.DEBIT,
           amountCents: '2500',
           currency: 'USD',
-          createdAt: '2026-07-29T12:00:00.000Z',
+          occurredAt: '2026-07-29T12:00:00.000Z',
         },
         availableAt: new Date(0),
       })),
@@ -184,6 +204,7 @@ describe('Outbox worker (integration)', () => {
     await Promise.all([workerOne.processOnce(), workerTwo.processOnce()]);
 
     const events = await prismaOne.outboxEvent.findMany({
+      where: { eventType: OutboxEventType.PAYMENT_RECEIVED },
       orderBy: { aggregateId: 'asc' },
     });
 
@@ -287,9 +308,9 @@ describe('Outbox worker (integration)', () => {
       await prismaOne.outboxEvent.count({
         where: { status: OutboxEventStatus.PROCESSED },
       }),
-    ).toBe(3);
+    ).toBe(4);
     expect(await prismaOne.outboxEvent.count({ where: { attempts: 1 } })).toBe(
-      3,
+      4,
     );
   });
 
@@ -375,16 +396,19 @@ describe('Outbox worker (integration)', () => {
       await prismaOne.outboxEvent.count({
         where: { status: OutboxEventStatus.PROCESSED },
       }),
-    ).toBe(3);
+    ).toBe(4);
     expect(await prismaOne.outboxEvent.count({ where: { attempts: 1 } })).toBe(
-      3,
+      4,
     );
   });
 
   it('marks an unfunded ACH CREDIT as terminal without reserving funds', async () => {
     await prismaOne.merchant.update({
       where: { id: 'merchant-1' },
-      data: { perPaymentLimit: BigInt(20_000), dailyAmountLimit: BigInt(20_000) },
+      data: {
+        perPaymentLimit: BigInt(20_000),
+        dailyAmountLimit: BigInt(20_000),
+      },
     });
     await prismaOne.ledgerEntry.update({
       where: { entryKey: 'initial-credit:merchant-1' },
@@ -392,50 +416,160 @@ describe('Outbox worker (integration)', () => {
     });
     await prismaOne.payment.create({
       data: {
-        id: 'insufficient-credit', merchantId: 'merchant-1', idempotencyKey: 'insufficient-credit-idem',
-        requestFingerprint: 'insufficient-credit-fingerprint', externalReference: 'insufficient-credit-reference',
-        direction: PaymentDirection.CREDIT, amountCents: BigInt(10_001), currency: 'USD',
-        receiverName: 'Receiver Inc', receiverAccountRef: 'insufficient-credit-account', routingNumber: '021000021',
+        id: 'insufficient-credit',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'insufficient-credit-idem',
+        requestFingerprint: 'insufficient-credit-fingerprint',
+        externalReference: 'insufficient-credit-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(10_001),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'insufficient-credit-account',
+        routingNumber: '021000021',
       },
     });
     await prismaOne.outboxEvent.create({
-      data: { eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: 'insufficient-credit', payload: { ...paymentPayload('insufficient-credit'), direction: PaymentDirection.CREDIT, amountCents: '10001' }, availableAt: new Date(0) },
+      data: {
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'insufficient-credit',
+        payload: {
+          ...paymentPayload('insufficient-credit'),
+          direction: PaymentDirection.CREDIT,
+          amountCents: '10001',
+        },
+        availableAt: new Date(0),
+      },
     });
 
     await workerOne.processOnce();
 
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'insufficient-credit' } });
-    const event = await prismaOne.outboxEvent.findFirstOrThrow({ where: { aggregateId: payment.id } });
-    expect(payment).toMatchObject({ status: PaymentStatus.VALIDATION_FAILED, failureCode: 'INSUFFICIENT_FUNDS', validationCode: 'INSUFFICIENT_FUNDS' });
-    expect(payment.failureReason).toContain('Available 10000, requested 10001, currency USD');
-    expect(event).toMatchObject({ status: OutboxEventStatus.PROCESSED, lastError: null });
-    expect(await prismaOne.reservation.count({ where: { paymentId: payment.id } })).toBe(0);
-    expect(await prismaOne.ledgerEntry.count({ where: { paymentId: payment.id, entryType: 'RESERVATION' } })).toBe(0);
-    expect(await prismaOne.merchantDailyUsage.count({ where: { merchantId: 'merchant-1' } })).toBe(0);
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'insufficient-credit' },
+    });
+    const event = await prismaOne.outboxEvent.findFirstOrThrow({
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+    });
+    expect(payment).toMatchObject({
+      status: PaymentStatus.VALIDATION_FAILED,
+      failureCode: 'INSUFFICIENT_FUNDS',
+      validationCode: 'INSUFFICIENT_FUNDS',
+    });
+    expect(payment.failureReason).toContain(
+      'Available 10000, requested 10001, currency USD',
+    );
+    expect(event).toMatchObject({
+      status: OutboxEventStatus.PROCESSED,
+      lastError: null,
+    });
+    expect(
+      await prismaOne.reservation.count({ where: { paymentId: payment.id } }),
+    ).toBe(0);
+    expect(
+      await prismaOne.ledgerEntry.count({
+        where: { paymentId: payment.id, entryType: 'RESERVATION' },
+      }),
+    ).toBe(0);
+    expect(
+      await prismaOne.merchantDailyUsage.count({
+        where: { merchantId: 'merchant-1' },
+      }),
+    ).toBe(0);
   });
 
   it('validates an ACH CREDIT equal to the exact available funding balance', async () => {
-    await prismaOne.merchant.update({ where: { id: 'merchant-1' }, data: { perPaymentLimit: BigInt(10_000), dailyAmountLimit: BigInt(10_000) } });
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
-    await prismaOne.payment.create({ data: { id: 'exact-credit', merchantId: 'merchant-1', idempotencyKey: 'exact-credit-idem', requestFingerprint: 'exact-credit-fingerprint', externalReference: 'exact-credit-reference', direction: PaymentDirection.CREDIT, amountCents: BigInt(10_000), currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: 'exact-credit-account', routingNumber: '021000021' } });
-    await prismaOne.outboxEvent.create({ data: { eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: 'exact-credit', payload: { ...paymentPayload('exact-credit'), direction: PaymentDirection.CREDIT, amountCents: '10000' }, availableAt: new Date(0) } });
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        perPaymentLimit: BigInt(10_000),
+        dailyAmountLimit: BigInt(10_000),
+      },
+    });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    await prismaOne.payment.create({
+      data: {
+        id: 'exact-credit',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'exact-credit-idem',
+        requestFingerprint: 'exact-credit-fingerprint',
+        externalReference: 'exact-credit-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(10_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'exact-credit-account',
+        routingNumber: '021000021',
+      },
+    });
+    await prismaOne.outboxEvent.create({
+      data: {
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'exact-credit',
+        payload: {
+          ...paymentPayload('exact-credit'),
+          direction: PaymentDirection.CREDIT,
+          amountCents: '10000',
+        },
+        availableAt: new Date(0),
+      },
+    });
 
     await workerOne.processOnce();
 
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'exact-credit' } });
-    const event = await prismaOne.outboxEvent.findFirstOrThrow({ where: { aggregateId: payment.id } });
-    const reservation = await prismaOne.reservation.findUniqueOrThrow({ where: { paymentId: payment.id } });
-    const entry = await prismaOne.ledgerEntry.findUniqueOrThrow({ where: { entryKey: `reservation:${payment.id}` } });
-    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({ where: { merchantId: 'merchant-1' } });
-    const posted = await prismaOne.ledgerEntry.aggregate({ where: { fundingAccountId: 'funding-account-1', entryType: 'INITIAL_CREDIT' }, _sum: { amount: true } });
-    const reserved = await prismaOne.reservation.aggregate({ where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' }, _sum: { amount: true } });
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'exact-credit' },
+    });
+    const event = await prismaOne.outboxEvent.findFirstOrThrow({
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+    });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: payment.id },
+    });
+    const entry = await prismaOne.ledgerEntry.findUniqueOrThrow({
+      where: { entryKey: `reservation:${payment.id}` },
+    });
+    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({
+      where: { merchantId: 'merchant-1' },
+    });
+    const posted = await prismaOne.ledgerEntry.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: 'INITIAL_CREDIT',
+      },
+      _sum: { amount: true },
+    });
+    const reserved = await prismaOne.reservation.aggregate({
+      where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' },
+      _sum: { amount: true },
+    });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(reserved._sum.amount ?? 0);
     expect(payment.status).toBe(PaymentStatus.VALIDATED);
     expect(payment.validatedAt).toBeInstanceOf(Date);
-    expect(event).toMatchObject({ status: OutboxEventStatus.PROCESSED, lastError: null });
-    expect(reservation).toMatchObject({ status: 'ACTIVE', amount: BigInt(10_000) });
-    expect(entry).toMatchObject({ entryType: 'RESERVATION', amount: BigInt(10_000), entryKey: 'reservation:exact-credit' });
+    expect(event).toMatchObject({
+      status: OutboxEventStatus.PROCESSED,
+      lastError: null,
+    });
+    expect(reservation).toMatchObject({
+      status: 'ACTIVE',
+      amount: BigInt(10_000),
+    });
+    expect(entry).toMatchObject({
+      entryType: 'RESERVATION',
+      amount: BigInt(10_000),
+      entryKey: 'reservation:exact-credit',
+    });
     expect(usage.utilizedAmount).toBe(BigInt(10_000));
     expect(postedBalance).toBe(BigInt(10_000));
     expect(activeReservedAmount).toBe(BigInt(10_000));
@@ -443,78 +577,358 @@ describe('Outbox worker (integration)', () => {
   });
 
   it('serializes concurrent ACH CREDIT reservations without overspending', async () => {
-    await prismaOne.merchant.update({ where: { id: 'merchant-1' }, data: { perPaymentLimit: BigInt(20_000), dailyAmountLimit: BigInt(20_000) } });
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
-    const rows = [['credit-a', BigInt(7_000)], ['credit-b', BigInt(5_000)]] as const;
-    await prismaOne.payment.createMany({ data: rows.map(([id, amountCents]) => ({ id, merchantId: 'merchant-1', idempotencyKey: `${id}-idem`, requestFingerprint: `${id}-fingerprint`, externalReference: `${id}-reference`, direction: PaymentDirection.CREDIT, amountCents, currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: `${id}-account`, routingNumber: '021000021' })) });
-    await prismaOne.outboxEvent.createMany({ data: rows.map(([id, amountCents]) => ({ eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: id, payload: { ...paymentPayload(id), direction: PaymentDirection.CREDIT, amountCents: amountCents.toString() }, availableAt: new Date(0) })) });
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        perPaymentLimit: BigInt(20_000),
+        dailyAmountLimit: BigInt(20_000),
+      },
+    });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    const rows = [
+      ['credit-a', BigInt(7_000)],
+      ['credit-b', BigInt(5_000)],
+    ] as const;
+    await prismaOne.payment.createMany({
+      data: rows.map(([id, amountCents]) => ({
+        id,
+        merchantId: 'merchant-1',
+        idempotencyKey: `${id}-idem`,
+        requestFingerprint: `${id}-fingerprint`,
+        externalReference: `${id}-reference`,
+        direction: PaymentDirection.CREDIT,
+        amountCents,
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `${id}-account`,
+        routingNumber: '021000021',
+      })),
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: rows.map(([id, amountCents]) => ({
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: id,
+        payload: {
+          ...paymentPayload(id),
+          direction: PaymentDirection.CREDIT,
+          amountCents: amountCents.toString(),
+        },
+        availableAt: new Date(0),
+      })),
+    });
 
     await Promise.all([workerOne.processOnce(), workerTwo.processOnce()]);
 
-    const payments = await prismaOne.payment.findMany({ where: { id: { in: rows.map(([id]) => id) } } });
-    expect(payments.filter((payment) => payment.status === PaymentStatus.VALIDATED)).toHaveLength(1);
-    expect(payments.filter((payment) => payment.status === PaymentStatus.VALIDATION_FAILED)).toHaveLength(1);
-    const winner = payments.find((payment) => payment.status === PaymentStatus.VALIDATED)!;
-    const loser = payments.find((payment) => payment.status === PaymentStatus.VALIDATION_FAILED)!;
-    const reservations = await prismaOne.reservation.findMany({ where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' } });
-    const entries = await prismaOne.ledgerEntry.findMany({ where: { fundingAccountId: 'funding-account-1', entryType: 'RESERVATION' } });
-    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({ where: { merchantId: 'merchant-1' } });
-    const events = await prismaOne.outboxEvent.findMany({ where: { aggregateId: { in: rows.map(([id]) => id) } } });
-    const activeReservedAmount = reservations.reduce((total, reservation) => total + reservation.amount, BigInt(0));
-    expect(winner).toBeDefined(); expect(loser).toMatchObject({ failureCode: 'INSUFFICIENT_FUNDS', validationCode: 'INSUFFICIENT_FUNDS' });
-    expect(reservations).toHaveLength(1); expect(reservations[0]).toMatchObject({ paymentId: winner.id, amount: winner.amountCents });
-    expect(entries).toHaveLength(1); expect(entries[0].paymentId).toBe(winner.id);
-    expect(await prismaOne.reservation.count({ where: { paymentId: loser.id } })).toBe(0);
-    expect(await prismaOne.ledgerEntry.count({ where: { paymentId: loser.id, entryType: 'RESERVATION' } })).toBe(0);
-    expect(usage.utilizedAmount).toBe(winner.amountCents); expect(activeReservedAmount).toBe(winner.amountCents); expect(activeReservedAmount).toBeLessThanOrEqual(BigInt(10_000));
-    expect(BigInt(10_000) - activeReservedAmount).toBeGreaterThanOrEqual(BigInt(0));
-    expect(events).toHaveLength(2); expect(events.every((event) => event.status === OutboxEventStatus.PROCESSED && event.lastError === null)).toBe(true);
+    const payments = await prismaOne.payment.findMany({
+      where: { id: { in: rows.map(([id]) => id) } },
+    });
+    expect(
+      payments.filter((payment) => payment.status === PaymentStatus.VALIDATED),
+    ).toHaveLength(1);
+    expect(
+      payments.filter(
+        (payment) => payment.status === PaymentStatus.VALIDATION_FAILED,
+      ),
+    ).toHaveLength(1);
+    const winner = payments.find(
+      (payment) => payment.status === PaymentStatus.VALIDATED,
+    )!;
+    const loser = payments.find(
+      (payment) => payment.status === PaymentStatus.VALIDATION_FAILED,
+    )!;
+    const reservations = await prismaOne.reservation.findMany({
+      where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' },
+    });
+    const entries = await prismaOne.ledgerEntry.findMany({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: 'RESERVATION',
+      },
+    });
+    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({
+      where: { merchantId: 'merchant-1' },
+    });
+    const events = await prismaOne.outboxEvent.findMany({
+      where: {
+        aggregateId: { in: rows.map(([id]) => id) },
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+    });
+    const activeReservedAmount = reservations.reduce(
+      (total, reservation) => total + reservation.amount,
+      BigInt(0),
+    );
+    expect(winner).toBeDefined();
+    expect(loser).toMatchObject({
+      failureCode: 'INSUFFICIENT_FUNDS',
+      validationCode: 'INSUFFICIENT_FUNDS',
+    });
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]).toMatchObject({
+      paymentId: winner.id,
+      amount: winner.amountCents,
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].paymentId).toBe(winner.id);
+    expect(
+      await prismaOne.reservation.count({ where: { paymentId: loser.id } }),
+    ).toBe(0);
+    expect(
+      await prismaOne.ledgerEntry.count({
+        where: { paymentId: loser.id, entryType: 'RESERVATION' },
+      }),
+    ).toBe(0);
+    expect(usage.utilizedAmount).toBe(winner.amountCents);
+    expect(activeReservedAmount).toBe(winner.amountCents);
+    expect(activeReservedAmount).toBeLessThanOrEqual(BigInt(10_000));
+    expect(BigInt(10_000) - activeReservedAmount).toBeGreaterThanOrEqual(
+      BigInt(0),
+    );
+    expect(events).toHaveLength(2);
+    expect(
+      events.every(
+        (event) =>
+          event.status === OutboxEventStatus.PROCESSED &&
+          event.lastError === null,
+      ),
+    ).toBe(true);
   });
 
   it('allows concurrent ACH CREDIT reservations when both fit', async () => {
-    await prismaOne.merchant.update({ where: { id: 'merchant-1' }, data: { perPaymentLimit: BigInt(10_000), dailyAmountLimit: BigInt(20_000) } });
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
-    const rows = [['fit-a', BigInt(4_000)], ['fit-b', BigInt(5_000)]] as const;
-    await prismaOne.payment.createMany({ data: rows.map(([id, amountCents]) => ({ id, merchantId: 'merchant-1', idempotencyKey: `${id}-idem`, requestFingerprint: `${id}-fingerprint`, externalReference: `${id}-reference`, direction: PaymentDirection.CREDIT, amountCents, currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: `${id}-account`, routingNumber: '021000021' })) });
-    await prismaOne.outboxEvent.createMany({ data: rows.map(([id, amountCents]) => ({ eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: id, payload: { ...paymentPayload(id), direction: PaymentDirection.CREDIT, amountCents: amountCents.toString() }, availableAt: new Date(0) })) });
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        perPaymentLimit: BigInt(10_000),
+        dailyAmountLimit: BigInt(20_000),
+      },
+    });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    const rows = [
+      ['fit-a', BigInt(4_000)],
+      ['fit-b', BigInt(5_000)],
+    ] as const;
+    await prismaOne.payment.createMany({
+      data: rows.map(([id, amountCents]) => ({
+        id,
+        merchantId: 'merchant-1',
+        idempotencyKey: `${id}-idem`,
+        requestFingerprint: `${id}-fingerprint`,
+        externalReference: `${id}-reference`,
+        direction: PaymentDirection.CREDIT,
+        amountCents,
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `${id}-account`,
+        routingNumber: '021000021',
+      })),
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: rows.map(([id, amountCents]) => ({
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: id,
+        payload: {
+          ...paymentPayload(id),
+          direction: PaymentDirection.CREDIT,
+          amountCents: amountCents.toString(),
+        },
+        availableAt: new Date(0),
+      })),
+    });
     await Promise.all([workerOne.processOnce(), workerTwo.processOnce()]);
-    const payments = await prismaOne.payment.findMany({ where: { id: { in: rows.map(([id]) => id) } } });
-    const reservations = await prismaOne.reservation.findMany({ where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' }, orderBy: { amount: 'asc' } });
-    const entries = await prismaOne.ledgerEntry.findMany({ where: { fundingAccountId: 'funding-account-1', entryType: 'RESERVATION' } });
-    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({ where: { merchantId: 'merchant-1' } });
-    const events = await prismaOne.outboxEvent.findMany({ where: { aggregateId: { in: rows.map(([id]) => id) } } });
-    const reserved = reservations.reduce((total, item) => total + item.amount, BigInt(0));
-    expect(payments).toHaveLength(2); expect(payments.every((payment) => payment.status === PaymentStatus.VALIDATED && payment.validatedAt)).toBe(true);
-    expect(reservations.map((item) => item.amount)).toEqual([BigInt(4_000), BigInt(5_000)]);
-    expect(entries).toHaveLength(2); expect(new Set(entries.map((item) => item.entryKey))).toEqual(new Set(['reservation:fit-a', 'reservation:fit-b']));
-    expect(usage.utilizedAmount).toBe(BigInt(9_000)); expect(reserved).toBe(BigInt(9_000)); expect(BigInt(10_000) - reserved).toBe(BigInt(1_000));
-    expect(events.every((event) => event.status === OutboxEventStatus.PROCESSED && event.lastError === null)).toBe(true);
+    const payments = await prismaOne.payment.findMany({
+      where: { id: { in: rows.map(([id]) => id) } },
+    });
+    const reservations = await prismaOne.reservation.findMany({
+      where: { fundingAccountId: 'funding-account-1', status: 'ACTIVE' },
+      orderBy: { amount: 'asc' },
+    });
+    const entries = await prismaOne.ledgerEntry.findMany({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: 'RESERVATION',
+      },
+    });
+    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({
+      where: { merchantId: 'merchant-1' },
+    });
+    const events = await prismaOne.outboxEvent.findMany({
+      where: {
+        aggregateId: { in: rows.map(([id]) => id) },
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+    });
+    const reserved = reservations.reduce(
+      (total, item) => total + item.amount,
+      BigInt(0),
+    );
+    expect(payments).toHaveLength(2);
+    expect(
+      payments.every(
+        (payment) =>
+          payment.status === PaymentStatus.VALIDATED && payment.validatedAt,
+      ),
+    ).toBe(true);
+    expect(reservations.map((item) => item.amount)).toEqual([
+      BigInt(4_000),
+      BigInt(5_000),
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(new Set(entries.map((item) => item.entryKey))).toEqual(
+      new Set(['reservation:fit-a', 'reservation:fit-b']),
+    );
+    expect(usage.utilizedAmount).toBe(BigInt(9_000));
+    expect(reserved).toBe(BigInt(9_000));
+    expect(BigInt(10_000) - reserved).toBe(BigInt(1_000));
+    expect(
+      events.every(
+        (event) =>
+          event.status === OutboxEventStatus.PROCESSED &&
+          event.lastError === null,
+      ),
+    ).toBe(true);
   });
 
   it('processes concurrent replay of the same ACH CREDIT exactly once', async () => {
-    await prismaOne.merchant.update({ where: { id: 'merchant-1' }, data: { perPaymentLimit: BigInt(10_000), dailyAmountLimit: BigInt(20_000) } });
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
-    await prismaOne.payment.create({ data: { id: 'replay-credit', merchantId: 'merchant-1', idempotencyKey: 'replay-credit-idem', requestFingerprint: 'replay-credit-fingerprint', externalReference: 'replay-credit-reference', direction: PaymentDirection.CREDIT, amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: 'replay-credit-account', routingNumber: '021000021' } });
-    await prismaOne.outboxEvent.createMany({ data: ['replay-event-a', 'replay-event-b'].map((id) => ({ id, eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: 'replay-credit', payload: { ...paymentPayload('replay-credit'), direction: PaymentDirection.CREDIT, amountCents: '4000' }, availableAt: new Date(0) })) });
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        perPaymentLimit: BigInt(10_000),
+        dailyAmountLimit: BigInt(20_000),
+      },
+    });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    await prismaOne.payment.create({
+      data: {
+        id: 'replay-credit',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'replay-credit-idem',
+        requestFingerprint: 'replay-credit-fingerprint',
+        externalReference: 'replay-credit-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'replay-credit-account',
+        routingNumber: '021000021',
+      },
+    });
+    await prismaOne.outboxEvent.createMany({
+      data: ['replay-event-a', 'replay-event-b'].map((id) => ({
+        id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'replay-credit',
+        payload: {
+          ...paymentPayload('replay-credit'),
+          direction: PaymentDirection.CREDIT,
+          amountCents: '4000',
+        },
+        availableAt: new Date(0),
+      })),
+    });
     await Promise.all([workerOne.processOnce(), workerTwo.processOnce()]);
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'replay-credit' } });
-    const reservations = await prismaOne.reservation.findMany({ where: { paymentId: payment.id } });
-    const entries = await prismaOne.ledgerEntry.findMany({ where: { paymentId: payment.id, entryType: 'RESERVATION' } });
-    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({ where: { merchantId: 'merchant-1' } });
-    const events = await prismaOne.outboxEvent.findMany({ where: { aggregateId: payment.id }, orderBy: { id: 'asc' } });
-    const reserved = reservations.reduce((total, item) => total + item.amount, BigInt(0));
-    expect(payment).toMatchObject({ status: PaymentStatus.VALIDATED, failureCode: null, validationCode: null }); expect(payment.validatedAt).toBeInstanceOf(Date);
-    expect(reservations).toHaveLength(1); expect(reservations[0]).toMatchObject({ status: 'ACTIVE', amount: BigInt(4_000) });
-    expect(entries).toHaveLength(1); expect(entries[0].entryKey).toBe('reservation:replay-credit');
-    expect(usage.utilizedAmount).toBe(BigInt(4_000)); expect(reserved).toBe(BigInt(4_000)); expect(BigInt(10_000) - reserved).toBe(BigInt(6_000));
-    expect(events).toHaveLength(2); expect(events.every((event) => event.status === OutboxEventStatus.PROCESSED && event.lastError === null && event.claimedAt === null && event.attempts === 1)).toBe(true);
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'replay-credit' },
+    });
+    const reservations = await prismaOne.reservation.findMany({
+      where: { paymentId: payment.id },
+    });
+    const entries = await prismaOne.ledgerEntry.findMany({
+      where: { paymentId: payment.id, entryType: 'RESERVATION' },
+    });
+    const usage = await prismaOne.merchantDailyUsage.findFirstOrThrow({
+      where: { merchantId: 'merchant-1' },
+    });
+    const events = await prismaOne.outboxEvent.findMany({
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+      orderBy: { id: 'asc' },
+    });
+    const reserved = reservations.reduce(
+      (total, item) => total + item.amount,
+      BigInt(0),
+    );
+    expect(payment).toMatchObject({
+      status: PaymentStatus.VALIDATED,
+      failureCode: null,
+      validationCode: null,
+    });
+    expect(payment.validatedAt).toBeInstanceOf(Date);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]).toMatchObject({
+      status: 'ACTIVE',
+      amount: BigInt(4_000),
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].entryKey).toBe('reservation:replay-credit');
+    expect(usage.utilizedAmount).toBe(BigInt(4_000));
+    expect(reserved).toBe(BigInt(4_000));
+    expect(BigInt(10_000) - reserved).toBe(BigInt(6_000));
+    expect(events).toHaveLength(2);
+    expect(
+      events.every(
+        (event) =>
+          event.status === OutboxEventStatus.PROCESSED &&
+          event.lastError === null &&
+          event.claimedAt === null &&
+          event.attempts === 1,
+      ),
+    ).toBe(true);
   });
 
   it('rolls back reservation state when credit validation fails inside the transaction', async () => {
-    await prismaOne.merchant.update({ where: { id: 'merchant-1' }, data: { perPaymentLimit: BigInt(10_000), dailyAmountLimit: BigInt(10_000) } });
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
-    await prismaOne.payment.create({ data: { id: 'rollback-credit', merchantId: 'merchant-1', idempotencyKey: 'rollback-credit-idem', requestFingerprint: 'rollback-credit-fingerprint', externalReference: 'rollback-credit-reference', direction: PaymentDirection.CREDIT, amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: 'rollback-credit-account', routingNumber: '021000021' } });
-    await prismaOne.outboxEvent.create({ data: { eventType: OutboxEventType.PAYMENT_RECEIVED, aggregateType: 'PAYMENT', aggregateId: 'rollback-credit', payload: { ...paymentPayload('rollback-credit'), direction: PaymentDirection.CREDIT, amountCents: '4000' }, availableAt: new Date(0) } });
+    await prismaOne.merchant.update({
+      where: { id: 'merchant-1' },
+      data: {
+        perPaymentLimit: BigInt(10_000),
+        dailyAmountLimit: BigInt(10_000),
+      },
+    });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    await prismaOne.payment.create({
+      data: {
+        id: 'rollback-credit',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'rollback-credit-idem',
+        requestFingerprint: 'rollback-credit-fingerprint',
+        externalReference: 'rollback-credit-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'rollback-credit-account',
+        routingNumber: '021000021',
+      },
+    });
+    await prismaOne.outboxEvent.create({
+      data: {
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'rollback-credit',
+        payload: {
+          ...paymentPayload('rollback-credit'),
+          direction: PaymentDirection.CREDIT,
+          amountCents: '4000',
+        },
+        availableAt: new Date(0),
+      },
+    });
     const spy = jest
       .spyOn(
         PaymentLifecycleRepository.prototype as unknown as {
@@ -528,10 +942,20 @@ describe('Outbox worker (integration)', () => {
     } finally {
       spy.mockRestore();
     }
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'rollback-credit' } });
-    const event = await prismaOne.outboxEvent.findFirstOrThrow({ where: { aggregateId: payment.id } });
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'rollback-credit' },
+    });
+    const event = await prismaOne.outboxEvent.findFirstOrThrow({
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
+    });
     const posted = await prismaOne.ledgerEntry.aggregate({
-      where: { fundingAccountId: 'funding-account-1', entryType: 'INITIAL_CREDIT' },
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: 'INITIAL_CREDIT',
+      },
       _sum: { amount: true },
     });
     const reserved = await prismaOne.reservation.aggregate({
@@ -540,10 +964,23 @@ describe('Outbox worker (integration)', () => {
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(reserved._sum.amount ?? 0);
-    expect(payment).toMatchObject({ status: PaymentStatus.RECEIVED, validatedAt: null });
-    expect(await prismaOne.reservation.count({ where: { paymentId: payment.id } })).toBe(0);
-    expect(await prismaOne.ledgerEntry.count({ where: { paymentId: payment.id, entryType: 'RESERVATION' } })).toBe(0);
-    expect(await prismaOne.merchantDailyUsage.count({ where: { merchantId: 'merchant-1' } })).toBe(0);
+    expect(payment).toMatchObject({
+      status: PaymentStatus.RECEIVED,
+      validatedAt: null,
+    });
+    expect(
+      await prismaOne.reservation.count({ where: { paymentId: payment.id } }),
+    ).toBe(0);
+    expect(
+      await prismaOne.ledgerEntry.count({
+        where: { paymentId: payment.id, entryType: 'RESERVATION' },
+      }),
+    ).toBe(0);
+    expect(
+      await prismaOne.merchantDailyUsage.count({
+        where: { merchantId: 'merchant-1' },
+      }),
+    ).toBe(0);
     expect(postedBalance).toBe(BigInt(10_000));
     expect(activeReservedAmount).toBe(BigInt(0));
     expect(postedBalance - activeReservedAmount).toBe(BigInt(10_000));
@@ -609,7 +1046,10 @@ describe('Outbox worker (integration)', () => {
       ),
     );
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
       where: {
@@ -720,7 +1160,10 @@ describe('Outbox worker (integration)', () => {
       },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
 
     expect(payment).toMatchObject({
@@ -731,7 +1174,9 @@ describe('Outbox worker (integration)', () => {
     });
     expect(payment.validatedAt).toBeInstanceOf(Date);
     expect(
-      await prismaOne.fundingAccount.count({ where: { merchantId: 'merchant-1' } }),
+      await prismaOne.fundingAccount.count({
+        where: { merchantId: 'merchant-1' },
+      }),
     ).toBe(0);
     expect(
       await prismaOne.reservation.count({ where: { paymentId: payment.id } }),
@@ -801,7 +1246,10 @@ describe('Outbox worker (integration)', () => {
       where: { id: 'credit-no-funding-account' },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
 
     expect(payment).toMatchObject({
@@ -813,7 +1261,9 @@ describe('Outbox worker (integration)', () => {
       validationMessage: 'No active USD funding account exists for merchant',
     });
     expect(
-      await prismaOne.fundingAccount.count({ where: { merchantId: 'merchant-1' } }),
+      await prismaOne.fundingAccount.count({
+        where: { merchantId: 'merchant-1' },
+      }),
     ).toBe(0);
     expect(
       await prismaOne.reservation.count({ where: { paymentId: payment.id } }),
@@ -905,7 +1355,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
 
     expect(payment).toMatchObject({
@@ -917,7 +1370,9 @@ describe('Outbox worker (integration)', () => {
       validationMessage: 'No active USD funding account exists for merchant',
     });
     expect(
-      await prismaOne.fundingAccount.count({ where: { merchantId: 'merchant-1' } }),
+      await prismaOne.fundingAccount.count({
+        where: { merchantId: 'merchant-1' },
+      }),
     ).toBe(1);
     expect(fundingAccount.status).toBe(FundingAccountStatus.CLOSED);
     expect(initialCredit.amount).toBe(BigInt(10_000));
@@ -1013,7 +1468,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
 
     expect(payment).toMatchObject({
@@ -1025,7 +1483,9 @@ describe('Outbox worker (integration)', () => {
       validationMessage: 'No active USD funding account exists for merchant',
     });
     expect(
-      await prismaOne.fundingAccount.count({ where: { merchantId: 'merchant-1' } }),
+      await prismaOne.fundingAccount.count({
+        where: { merchantId: 'merchant-1' },
+      }),
     ).toBe(1);
     expect(fundingAccount).toMatchObject({
       status: FundingAccountStatus.ACTIVE,
@@ -1149,7 +1609,10 @@ describe('Outbox worker (integration)', () => {
       where: { merchantId: payment.merchantId },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const usdPostedBalance = BigInt(usdPosted._sum.amount ?? 0);
     const usdReservedAmount = usdReservations.reduce(
@@ -1298,7 +1761,9 @@ describe('Outbox worker (integration)', () => {
       },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const posted = await prismaOne.ledgerEntry.aggregate({
       where: {
@@ -1312,7 +1777,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: newPayment.id },
+      where: {
+        aggregateId: newPayment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(reserved._sum.amount ?? 0);
@@ -1337,7 +1805,9 @@ describe('Outbox worker (integration)', () => {
       amount: BigInt(7_000),
     });
     expect(
-      await prismaOne.reservation.count({ where: { paymentId: newPayment.id } }),
+      await prismaOne.reservation.count({
+        where: { paymentId: newPayment.id },
+      }),
     ).toBe(0);
     expect(
       await prismaOne.ledgerEntry.count({
@@ -1458,7 +1928,9 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: payment.id, entryType: 'RESERVATION' },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const posted = await prismaOne.ledgerEntry.aggregate({
       where: {
@@ -1475,7 +1947,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
@@ -1638,10 +2113,15 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = activeReservations.reduce(
@@ -1815,10 +2295,15 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const usdPostedBalance = BigInt(usdPosted._sum.amount ?? 0);
     const usdReservedAmount = usdReservations.reduce(
@@ -1971,7 +2456,8 @@ describe('Outbox worker (integration)', () => {
         idempotencyKey: 'credit-after-multiple-active-reservations-idem',
         requestFingerprint:
           'credit-after-multiple-active-reservations-fingerprint',
-        externalReference: 'credit-after-multiple-active-reservations-reference',
+        externalReference:
+          'credit-after-multiple-active-reservations-reference',
         direction: PaymentDirection.CREDIT,
         amountCents: BigInt(4_000),
         currency: 'USD',
@@ -2009,7 +2495,9 @@ describe('Outbox worker (integration)', () => {
     });
     const existingEntries = await prismaOne.ledgerEntry.findMany({
       where: {
-        paymentId: { in: ['existing-reservation-one', 'existing-reservation-two'] },
+        paymentId: {
+          in: ['existing-reservation-one', 'existing-reservation-two'],
+        },
         entryType: 'RESERVATION',
       },
       orderBy: { entryKey: 'asc' },
@@ -2021,7 +2509,9 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: payment.id, entryType: 'RESERVATION' },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const posted = await prismaOne.ledgerEntry.aggregate({
       where: {
@@ -2038,7 +2528,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
@@ -2162,12 +2655,16 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: payment.id, entryType: LedgerEntryType.RESERVATION },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const posted = await prismaOne.ledgerEntry.aggregate({
       where: {
         fundingAccountId: 'funding-account-1',
-        entryType: { in: [LedgerEntryType.INITIAL_CREDIT, LedgerEntryType.CREDIT_POSTED] },
+        entryType: {
+          in: [LedgerEntryType.INITIAL_CREDIT, LedgerEntryType.CREDIT_POSTED],
+        },
       },
       _sum: { amount: true },
     });
@@ -2179,7 +2676,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
@@ -2320,7 +2820,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(balances[0]?.total ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
@@ -2449,7 +2952,9 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: payment.id, entryType: LedgerEntryType.RESERVATION },
     });
     const usage = await prismaOne.merchantDailyUsage.findUniqueOrThrow({
-      where: { merchantId_businessDate: { merchantId: 'merchant-1', businessDate } },
+      where: {
+        merchantId_businessDate: { merchantId: 'merchant-1', businessDate },
+      },
     });
     const balances = await prismaOne.$queryRaw<{ total: bigint | null }[]>(
       Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
@@ -2462,7 +2967,10 @@ describe('Outbox worker (integration)', () => {
       _sum: { amount: true },
     });
     const event = await prismaOne.outboxEvent.findFirstOrThrow({
-      where: { aggregateId: payment.id },
+      where: {
+        aggregateId: payment.id,
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+      },
     });
     const postedBalance = BigInt(balances[0]?.total ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
@@ -2727,7 +3235,8 @@ describe('Outbox worker (integration)', () => {
         id: 'released-duplicate-reservation-payment',
         merchantId: 'merchant-1',
         idempotencyKey: 'released-duplicate-reservation-payment-idem',
-        requestFingerprint: 'released-duplicate-reservation-payment-fingerprint',
+        requestFingerprint:
+          'released-duplicate-reservation-payment-fingerprint',
         externalReference: 'released-duplicate-reservation-payment-reference',
         direction: PaymentDirection.CREDIT,
         amountCents: BigInt(4_000),
@@ -2884,9 +3393,11 @@ describe('Outbox worker (integration)', () => {
     const firstRelease = await lifecycle.releaseReservationForPayment(
       'idempotent-release-payment',
     );
-    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow({
-      where: { paymentId: 'idempotent-release-payment' },
-    });
+    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow(
+      {
+        where: { paymentId: 'idempotent-release-payment' },
+      },
+    );
     const releaseEntriesAfterFirst = await prismaOne.ledgerEntry.findMany({
       where: {
         paymentId: 'idempotent-release-payment',
@@ -3154,7 +3665,9 @@ describe('Outbox worker (integration)', () => {
     let error: unknown;
 
     try {
-      await lifecycle.releaseReservationForPayment('release-without-reservation');
+      await lifecycle.releaseReservationForPayment(
+        'release-without-reservation',
+      );
     } catch (caught) {
       error = caught;
     }
@@ -3563,7 +4076,9 @@ describe('Outbox worker (integration)', () => {
     await prismaOne.ledgerEntry.deleteMany({
       where: { fundingAccountId: 'funding-account-1' },
     });
-    await prismaOne.fundingAccount.delete({ where: { id: 'funding-account-1' } });
+    await prismaOne.fundingAccount.delete({
+      where: { id: 'funding-account-1' },
+    });
     await prismaOne.fundingAccount.createMany({
       data: [
         {
@@ -3669,11 +4184,17 @@ describe('Outbox worker (integration)', () => {
       ],
     });
     const usdActiveBefore = await prismaOne.reservation.aggregate({
-      where: { fundingAccountId: 'funding-account-usd', status: ReservationStatus.ACTIVE },
+      where: {
+        fundingAccountId: 'funding-account-usd',
+        status: ReservationStatus.ACTIVE,
+      },
       _sum: { amount: true },
     });
     const cadActiveBefore = await prismaOne.reservation.aggregate({
-      where: { fundingAccountId: 'funding-account-cad', status: ReservationStatus.ACTIVE },
+      where: {
+        fundingAccountId: 'funding-account-cad',
+        status: ReservationStatus.ACTIVE,
+      },
       _sum: { amount: true },
     });
     const usageBefore = await prismaOne.merchantDailyUsage.count();
@@ -3723,19 +4244,31 @@ describe('Outbox worker (integration)', () => {
     });
     const [usdPosted, cadPosted, usdActive, cadActive] = await Promise.all([
       prismaOne.ledgerEntry.aggregate({
-        where: { fundingAccountId: 'funding-account-usd', entryType: LedgerEntryType.INITIAL_CREDIT },
+        where: {
+          fundingAccountId: 'funding-account-usd',
+          entryType: LedgerEntryType.INITIAL_CREDIT,
+        },
         _sum: { amount: true },
       }),
       prismaOne.ledgerEntry.aggregate({
-        where: { fundingAccountId: 'funding-account-cad', entryType: LedgerEntryType.INITIAL_CREDIT },
+        where: {
+          fundingAccountId: 'funding-account-cad',
+          entryType: LedgerEntryType.INITIAL_CREDIT,
+        },
         _sum: { amount: true },
       }),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-usd', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-usd',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-cad', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-cad',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -3860,7 +4393,10 @@ describe('Outbox worker (integration)', () => {
     const [beforeRows, activeBefore] = await Promise.all([
       balanceQuery(),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-1',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -3902,7 +4438,10 @@ describe('Outbox worker (integration)', () => {
     const [afterRows, activeAfter] = await Promise.all([
       balanceQuery(),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-1',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -3947,7 +4486,9 @@ describe('Outbox worker (integration)', () => {
     await prismaOne.ledgerEntry.deleteMany({
       where: { fundingAccountId: 'funding-account-1' },
     });
-    await prismaOne.fundingAccount.delete({ where: { id: 'funding-account-1' } });
+    await prismaOne.fundingAccount.delete({
+      where: { id: 'funding-account-1' },
+    });
     await prismaOne.fundingAccount.create({
       data: {
         id: 'inactive-account-release-funding',
@@ -4160,9 +4701,11 @@ describe('Outbox worker (integration)', () => {
     const firstRelease = await repositoryA.releaseReservationForPayment(
       'cross-instance-release-payment',
     );
-    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow({
-      where: { paymentId: 'cross-instance-release-payment' },
-    });
+    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow(
+      {
+        where: { paymentId: 'cross-instance-release-payment' },
+      },
+    );
     const releaseAfterFirst = await prismaOne.ledgerEntry.findFirstOrThrow({
       where: {
         paymentId: 'cross-instance-release-payment',
@@ -4259,7 +4802,9 @@ describe('Outbox worker (integration)', () => {
     await prismaOne.ledgerEntry.deleteMany({
       where: { fundingAccountId: 'funding-account-1' },
     });
-    await prismaOne.fundingAccount.delete({ where: { id: 'funding-account-1' } });
+    await prismaOne.fundingAccount.delete({
+      where: { id: 'funding-account-1' },
+    });
     await prismaOne.fundingAccount.createMany({
       data: [
         {
@@ -4330,11 +4875,17 @@ describe('Outbox worker (integration)', () => {
     });
     const [usdActiveBefore, cadActiveBefore] = await Promise.all([
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-usd', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'persisted-release-account-usd',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-cad', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'persisted-release-account-cad',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -4351,10 +4902,16 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: 'persisted-account-release-payment' },
     });
     const originalEntries = await prismaOne.ledgerEntry.findMany({
-      where: { paymentId: 'persisted-account-release-payment', entryType: LedgerEntryType.RESERVATION },
+      where: {
+        paymentId: 'persisted-account-release-payment',
+        entryType: LedgerEntryType.RESERVATION,
+      },
     });
     const releaseEntries = await prismaOne.ledgerEntry.findMany({
-      where: { paymentId: 'persisted-account-release-payment', entryType: LedgerEntryType.RESERVATION_RELEASE },
+      where: {
+        paymentId: 'persisted-account-release-payment',
+        entryType: LedgerEntryType.RESERVATION_RELEASE,
+      },
     });
     const usdReleaseEntries = await prismaOne.ledgerEntry.count({
       where: {
@@ -4362,24 +4919,37 @@ describe('Outbox worker (integration)', () => {
         entryType: LedgerEntryType.RESERVATION_RELEASE,
       },
     });
-    const [usdPosted, cadPosted, usdActiveAfter, cadActiveAfter] = await Promise.all([
-      prismaOne.ledgerEntry.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-usd', entryType: LedgerEntryType.INITIAL_CREDIT },
-        _sum: { amount: true },
-      }),
-      prismaOne.ledgerEntry.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-cad', entryType: LedgerEntryType.INITIAL_CREDIT },
-        _sum: { amount: true },
-      }),
-      prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-usd', status: ReservationStatus.ACTIVE },
-        _sum: { amount: true },
-      }),
-      prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'persisted-release-account-cad', status: ReservationStatus.ACTIVE },
-        _sum: { amount: true },
-      }),
-    ]);
+    const [usdPosted, cadPosted, usdActiveAfter, cadActiveAfter] =
+      await Promise.all([
+        prismaOne.ledgerEntry.aggregate({
+          where: {
+            fundingAccountId: 'persisted-release-account-usd',
+            entryType: LedgerEntryType.INITIAL_CREDIT,
+          },
+          _sum: { amount: true },
+        }),
+        prismaOne.ledgerEntry.aggregate({
+          where: {
+            fundingAccountId: 'persisted-release-account-cad',
+            entryType: LedgerEntryType.INITIAL_CREDIT,
+          },
+          _sum: { amount: true },
+        }),
+        prismaOne.reservation.aggregate({
+          where: {
+            fundingAccountId: 'persisted-release-account-usd',
+            status: ReservationStatus.ACTIVE,
+          },
+          _sum: { amount: true },
+        }),
+        prismaOne.reservation.aggregate({
+          where: {
+            fundingAccountId: 'persisted-release-account-cad',
+            status: ReservationStatus.ACTIVE,
+          },
+          _sum: { amount: true },
+        }),
+      ]);
     const usdPostedBalance = BigInt(usdPosted._sum.amount ?? 0);
     const cadPostedBalance = BigInt(cadPosted._sum.amount ?? 0);
     const usdActiveReservedAmount = BigInt(usdActiveAfter._sum.amount ?? 0);
@@ -4443,7 +5013,7 @@ describe('Outbox worker (integration)', () => {
         receiverName: 'Receiver Inc',
         receiverAccountRef: 'first-settlement-payment-account',
         routingNumber: '021000021',
-        status: PaymentStatus.VALIDATED,
+        status: PaymentStatus.SUBMITTED,
         validatedAt: businessDate,
         createdAt: businessDate,
       },
@@ -4484,9 +5054,11 @@ describe('Outbox worker (integration)', () => {
     const firstSettlement = await lifecycle.settleReservationForPayment(
       'first-settlement-payment',
     );
-    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow({
-      where: { paymentId: 'first-settlement-payment' },
-    });
+    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow(
+      {
+        where: { paymentId: 'first-settlement-payment' },
+      },
+    );
     const settlementAfterFirst = await prismaOne.ledgerEntry.findFirstOrThrow({
       where: {
         paymentId: 'first-settlement-payment',
@@ -4562,7 +5134,7 @@ describe('Outbox worker (integration)', () => {
     expect(await prismaOne.reservation.count()).toBe(1);
     expect(await prismaOne.ledgerEntry.count()).toBe(3);
     expect(await prismaOne.merchantDailyUsage.count()).toBe(usageBefore);
-    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore);
+    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore + 1);
     expect(postedBefore).toBe(BigInt(10_000));
     expect(postedAfter).toBe(BigInt(10_000));
     expect(activeReservedBefore).toBe(BigInt(4_000));
@@ -4590,7 +5162,7 @@ describe('Outbox worker (integration)', () => {
         receiverName: 'Receiver Inc',
         receiverAccountRef: 'concurrent-settlement-payment-account',
         routingNumber: '021000021',
-        status: PaymentStatus.VALIDATED,
+        status: PaymentStatus.SUBMITTED,
         validatedAt: businessDate,
         createdAt: businessDate,
       },
@@ -4705,7 +5277,7 @@ describe('Outbox worker (integration)', () => {
     expect(await prismaOne.reservation.count()).toBe(1);
     expect(await prismaOne.ledgerEntry.count()).toBe(3);
     expect(await prismaOne.merchantDailyUsage.count()).toBe(usageBefore);
-    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore);
+    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore + 1);
     expect(postedBalance).toBe(BigInt(10_000));
     expect(activeReservedAmount).toBe(BigInt(0));
     expect(postedBalance - activeReservedAmount).toBe(BigInt(10_000));
@@ -4730,7 +5302,7 @@ describe('Outbox worker (integration)', () => {
         receiverName: 'Receiver Inc',
         receiverAccountRef: 'settlement-ledger-conflict-payment-account',
         routingNumber: '021000021',
-        status: PaymentStatus.VALIDATED,
+        status: PaymentStatus.SUBMITTED,
         validatedAt: businessDate,
         createdAt: businessDate,
       },
@@ -4900,7 +5472,10 @@ describe('Outbox worker (integration)', () => {
     const [beforeRows, activeBefore] = await Promise.all([
       balanceQuery(),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-1',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -4916,11 +5491,16 @@ describe('Outbox worker (integration)', () => {
       'first-return-payment',
       'R01',
     );
-    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow({
-      where: { paymentId: 'first-return-payment' },
-    });
+    const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow(
+      {
+        where: { paymentId: 'first-return-payment' },
+      },
+    );
     const returnAfterFirst = await prismaOne.ledgerEntry.findFirstOrThrow({
-      where: { paymentId: 'first-return-payment', entryType: LedgerEntryType.RETURN },
+      where: {
+        paymentId: 'first-return-payment',
+        entryType: LedgerEntryType.RETURN,
+      },
     });
     const secondReturn = await lifecycle.returnSettlementForPayment(
       'first-return-payment',
@@ -4930,15 +5510,24 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: 'first-return-payment' },
     });
     const settlementEntries = await prismaOne.ledgerEntry.count({
-      where: { paymentId: 'first-return-payment', entryType: LedgerEntryType.SETTLEMENT },
+      where: {
+        paymentId: 'first-return-payment',
+        entryType: LedgerEntryType.SETTLEMENT,
+      },
     });
     const returnEntries = await prismaOne.ledgerEntry.findMany({
-      where: { paymentId: 'first-return-payment', entryType: LedgerEntryType.RETURN },
+      where: {
+        paymentId: 'first-return-payment',
+        entryType: LedgerEntryType.RETURN,
+      },
     });
     const [afterRows, activeAfter] = await Promise.all([
       balanceQuery(),
       prismaOne.reservation.aggregate({
-        where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+        where: {
+          fundingAccountId: 'funding-account-1',
+          status: ReservationStatus.ACTIVE,
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -4972,7 +5561,7 @@ describe('Outbox worker (integration)', () => {
     expect(await prismaOne.reservation.count()).toBe(1);
     expect(await prismaOne.ledgerEntry.count()).toBe(4);
     expect(await prismaOne.merchantDailyUsage.count()).toBe(usageBefore);
-    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore);
+    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore + 1);
     expect(postedAfter).toBe(BigInt(14_000));
     expect(activeReservedAfter).toBe(BigInt(0));
     expect(postedBefore - activeReservedBefore).toBe(BigInt(10_000));
@@ -5015,8 +5604,20 @@ describe('Outbox worker (integration)', () => {
     });
     await prismaOne.ledgerEntry.createMany({
       data: [
-        { entryKey: 'reservation:concurrent-return-payment', fundingAccountId: 'funding-account-1', paymentId: 'concurrent-return-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(4_000) },
-        { entryKey: 'settlement:concurrent-return-payment', fundingAccountId: 'funding-account-1', paymentId: 'concurrent-return-payment', entryType: LedgerEntryType.SETTLEMENT, amount: BigInt(4_000) },
+        {
+          entryKey: 'reservation:concurrent-return-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'concurrent-return-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'settlement:concurrent-return-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'concurrent-return-payment',
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: BigInt(4_000),
+        },
       ],
     });
     const usageBefore = await prismaOne.merchantDailyUsage.count();
@@ -5039,32 +5640,55 @@ describe('Outbox worker (integration)', () => {
       where: { paymentId: 'concurrent-return-payment' },
     });
     const returnEntries = await prismaOne.ledgerEntry.findMany({
-      where: { paymentId: 'concurrent-return-payment', entryType: LedgerEntryType.RETURN },
+      where: {
+        paymentId: 'concurrent-return-payment',
+        entryType: LedgerEntryType.RETURN,
+      },
     });
     const balances = await prismaOne.$queryRaw<{ total: bigint | null }[]>(
       Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
     );
     const activeReservations = await prismaOne.reservation.aggregate({
-      where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+      where: {
+        fundingAccountId: 'funding-account-1',
+        status: ReservationStatus.ACTIVE,
+      },
       _sum: { amount: true },
     });
     const postedBalance = BigInt(balances[0]?.total ?? 0);
     const activeReservedAmount = BigInt(activeReservations._sum.amount ?? 0);
 
-    expect(firstReturn).toMatchObject({ id: 'concurrent-return-reservation', status: ReservationStatus.RETURNED, returnCode: 'R01' });
-    expect(secondReturn).toMatchObject({ id: 'concurrent-return-reservation', status: ReservationStatus.RETURNED, returnCode: 'R01' });
+    expect(firstReturn).toMatchObject({
+      id: 'concurrent-return-reservation',
+      status: ReservationStatus.RETURNED,
+      returnCode: 'R01',
+    });
+    expect(secondReturn).toMatchObject({
+      id: 'concurrent-return-reservation',
+      status: ReservationStatus.RETURNED,
+      returnCode: 'R01',
+    });
     expect(firstReturn.returnedAt).toBeInstanceOf(Date);
     expect(secondReturn.returnedAt).toEqual(firstReturn.returnedAt);
     expect(reservations).toEqual([
-      expect.objectContaining({ id: 'concurrent-return-reservation', status: ReservationStatus.RETURNED, settledAt: businessDate, returnedAt: firstReturn.returnedAt, returnCode: 'R01' }),
+      expect.objectContaining({
+        id: 'concurrent-return-reservation',
+        status: ReservationStatus.RETURNED,
+        settledAt: businessDate,
+        returnedAt: firstReturn.returnedAt,
+        returnCode: 'R01',
+      }),
     ]);
     expect(returnEntries).toEqual([
-      expect.objectContaining({ entryKey: 'return:concurrent-return-payment', amount: BigInt(4_000) }),
+      expect.objectContaining({
+        entryKey: 'return:concurrent-return-payment',
+        amount: BigInt(4_000),
+      }),
     ]);
     expect(await prismaOne.reservation.count()).toBe(1);
     expect(await prismaOne.ledgerEntry.count()).toBe(4);
     expect(await prismaOne.merchantDailyUsage.count()).toBe(usageBefore);
-    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore);
+    expect(await prismaOne.outboxEvent.count()).toBe(outboxBefore + 1);
     expect(postedBalance).toBe(BigInt(14_000));
     expect(activeReservedAmount).toBe(BigInt(0));
     expect(postedBalance - activeReservedAmount).toBe(BigInt(14_000));
@@ -5072,18 +5696,61 @@ describe('Outbox worker (integration)', () => {
 
   it('rolls back return when the return audit entry conflicts', async () => {
     const businessDate = new Date(Date.UTC(2026, 6, 29));
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
     await prismaOne.payment.create({
-      data: { id: 'return-ledger-conflict-payment', merchantId: 'merchant-1', idempotencyKey: 'return-ledger-conflict-payment-idem', requestFingerprint: 'return-ledger-conflict-payment-fingerprint', externalReference: 'return-ledger-conflict-payment-reference', direction: PaymentDirection.CREDIT, amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: 'return-ledger-conflict-payment-account', routingNumber: '021000021', status: PaymentStatus.VALIDATED, validatedAt: businessDate, createdAt: businessDate },
+      data: {
+        id: 'return-ledger-conflict-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'return-ledger-conflict-payment-idem',
+        requestFingerprint: 'return-ledger-conflict-payment-fingerprint',
+        externalReference: 'return-ledger-conflict-payment-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'return-ledger-conflict-payment-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.VALIDATED,
+        validatedAt: businessDate,
+        createdAt: businessDate,
+      },
     });
     await prismaOne.reservation.create({
-      data: { id: 'return-ledger-conflict-reservation', paymentId: 'return-ledger-conflict-payment', fundingAccountId: 'funding-account-1', amount: BigInt(4_000), status: ReservationStatus.SETTLED, settledAt: businessDate },
+      data: {
+        id: 'return-ledger-conflict-reservation',
+        paymentId: 'return-ledger-conflict-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(4_000),
+        status: ReservationStatus.SETTLED,
+        settledAt: businessDate,
+      },
     });
     await prismaOne.ledgerEntry.createMany({
       data: [
-        { entryKey: 'reservation:return-ledger-conflict-payment', fundingAccountId: 'funding-account-1', paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(4_000) },
-        { entryKey: 'settlement:return-ledger-conflict-payment', fundingAccountId: 'funding-account-1', paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.SETTLEMENT, amount: BigInt(4_000) },
-        { entryKey: 'return:return-ledger-conflict-payment', fundingAccountId: 'funding-account-1', paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(1) },
+        {
+          entryKey: 'reservation:return-ledger-conflict-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'return-ledger-conflict-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'settlement:return-ledger-conflict-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'return-ledger-conflict-payment',
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'return:return-ledger-conflict-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'return-ledger-conflict-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(1),
+        },
       ],
     });
     const lifecycle = new PaymentLifecycleRepository(prismaOne);
@@ -5092,7 +5759,10 @@ describe('Outbox worker (integration)', () => {
     const ledgerCountBefore = await prismaOne.ledgerEntry.count();
     let error: unknown;
     try {
-      await lifecycle.returnSettlementForPayment('return-ledger-conflict-payment', 'R01');
+      await lifecycle.returnSettlementForPayment(
+        'return-ledger-conflict-payment',
+        'R01',
+      );
     } catch (caught) {
       error = caught;
     }
@@ -5100,20 +5770,67 @@ describe('Outbox worker (integration)', () => {
     expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
     const prismaError = error as Prisma.PrismaClientKnownRequestError;
     expect(prismaError.code).toBe('P2002');
-    const reservation = await prismaOne.reservation.findUniqueOrThrow({ where: { paymentId: 'return-ledger-conflict-payment' } });
-    const reservationEntries = await prismaOne.ledgerEntry.count({ where: { paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.RESERVATION, entryKey: 'reservation:return-ledger-conflict-payment' } });
-    const settlementEntries = await prismaOne.ledgerEntry.count({ where: { paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.SETTLEMENT } });
-    const conflictingEntries = await prismaOne.ledgerEntry.findMany({ where: { paymentId: 'return-ledger-conflict-payment', entryKey: 'return:return-ledger-conflict-payment' } });
-    const validReturnEntries = await prismaOne.ledgerEntry.count({ where: { paymentId: 'return-ledger-conflict-payment', entryType: LedgerEntryType.RETURN } });
-    const posted = await prismaOne.ledgerEntry.aggregate({ where: { fundingAccountId: 'funding-account-1', entryType: LedgerEntryType.INITIAL_CREDIT }, _sum: { amount: true } });
-    const active = await prismaOne.reservation.aggregate({ where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE }, _sum: { amount: true } });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: 'return-ledger-conflict-payment' },
+    });
+    const reservationEntries = await prismaOne.ledgerEntry.count({
+      where: {
+        paymentId: 'return-ledger-conflict-payment',
+        entryType: LedgerEntryType.RESERVATION,
+        entryKey: 'reservation:return-ledger-conflict-payment',
+      },
+    });
+    const settlementEntries = await prismaOne.ledgerEntry.count({
+      where: {
+        paymentId: 'return-ledger-conflict-payment',
+        entryType: LedgerEntryType.SETTLEMENT,
+      },
+    });
+    const conflictingEntries = await prismaOne.ledgerEntry.findMany({
+      where: {
+        paymentId: 'return-ledger-conflict-payment',
+        entryKey: 'return:return-ledger-conflict-payment',
+      },
+    });
+    const validReturnEntries = await prismaOne.ledgerEntry.count({
+      where: {
+        paymentId: 'return-ledger-conflict-payment',
+        entryType: LedgerEntryType.RETURN,
+      },
+    });
+    const posted = await prismaOne.ledgerEntry.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: LedgerEntryType.INITIAL_CREDIT,
+      },
+      _sum: { amount: true },
+    });
+    const active = await prismaOne.reservation.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        status: ReservationStatus.ACTIVE,
+      },
+      _sum: { amount: true },
+    });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const activeReservedAmount = BigInt(active._sum.amount ?? 0);
 
-    expect(reservation).toMatchObject({ id: 'return-ledger-conflict-reservation', status: ReservationStatus.SETTLED, settledAt: businessDate, returnedAt: null, returnCode: null });
+    expect(reservation).toMatchObject({
+      id: 'return-ledger-conflict-reservation',
+      status: ReservationStatus.SETTLED,
+      settledAt: businessDate,
+      returnedAt: null,
+      returnCode: null,
+    });
     expect(reservationEntries).toBe(1);
     expect(settlementEntries).toBe(1);
-    expect(conflictingEntries).toEqual([expect.objectContaining({ entryType: LedgerEntryType.RESERVATION, amount: BigInt(1), entryKey: 'return:return-ledger-conflict-payment' })]);
+    expect(conflictingEntries).toEqual([
+      expect.objectContaining({
+        entryType: LedgerEntryType.RESERVATION,
+        amount: BigInt(1),
+        entryKey: 'return:return-ledger-conflict-payment',
+      }),
+    ]);
     expect(validReturnEntries).toBe(0);
     expect(await prismaOne.ledgerEntry.count()).toBe(ledgerCountBefore);
     expect(await prismaOne.reservation.count()).toBe(1);
@@ -5132,44 +5849,103 @@ describe('Outbox worker (integration)', () => {
     });
     await prismaOne.payment.create({
       data: {
-        id: 'reconciled-payment', merchantId: 'merchant-1',
-        idempotencyKey: 'reconciled-payment-idem', requestFingerprint: 'reconciled-payment-fingerprint',
-        externalReference: 'reconciled-payment-reference', direction: PaymentDirection.CREDIT,
-        amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc',
-        receiverAccountRef: 'reconciled-payment-account', routingNumber: '021000021',
-        status: PaymentStatus.SETTLED, validatedAt: timestamp, createdAt: timestamp,
+        id: 'reconciled-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'reconciled-payment-idem',
+        requestFingerprint: 'reconciled-payment-fingerprint',
+        externalReference: 'reconciled-payment-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'reconciled-payment-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SETTLED,
+        validatedAt: timestamp,
+        createdAt: timestamp,
       },
     });
     await prismaOne.reservation.create({
       data: {
-        id: 'reconciled-reservation', paymentId: 'reconciled-payment',
-        fundingAccountId: 'funding-account-1', amount: BigInt(4_000),
-        status: ReservationStatus.SETTLED, settledAt: timestamp,
+        id: 'reconciled-reservation',
+        paymentId: 'reconciled-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(4_000),
+        status: ReservationStatus.SETTLED,
+        settledAt: timestamp,
       },
     });
     await prismaOne.ledgerEntry.createMany({
       data: [
-        { entryKey: 'reservation:reconciled-payment', fundingAccountId: 'funding-account-1', paymentId: 'reconciled-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(4_000) },
-        { entryKey: 'settlement:reconciled-payment', fundingAccountId: 'funding-account-1', paymentId: 'reconciled-payment', entryType: LedgerEntryType.SETTLEMENT, amount: BigInt(4_000) },
+        {
+          entryKey: 'reservation:reconciled-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'reconciled-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'settlement:reconciled-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'reconciled-payment',
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: BigInt(4_000),
+        },
       ],
     });
     const lifecycle = new PaymentLifecycleRepository(prismaOne);
-    const event = { bankEventId: 'bank-event-001', paymentId: 'reconciled-payment', eventType: 'SETTLED' as const, eventTimestamp: timestamp };
+    const event = {
+      bankEventId: 'bank-event-001',
+      paymentId: 'reconciled-payment',
+      eventType: 'SETTLED' as const,
+      eventTimestamp: timestamp,
+    };
     const usageBefore = await prismaOne.merchantDailyUsage.count();
     const outboxBefore = await prismaOne.outboxEvent.count();
     const first = await lifecycle.processBankSettlementEvent(event);
     const second = await lifecycle.processBankSettlementEvent(event);
-    const events = await prismaOne.processedBankEvent.findMany({ where: { bankEventId: 'bank-event-001' } });
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'reconciled-payment' } });
-    const reservation = await prismaOne.reservation.findUniqueOrThrow({ where: { paymentId: 'reconciled-payment' } });
-    const settlementEntries = await prismaOne.ledgerEntry.count({ where: { paymentId: 'reconciled-payment', entryType: LedgerEntryType.SETTLEMENT } });
-    const posted = await prismaOne.ledgerEntry.aggregate({ where: { fundingAccountId: 'funding-account-1', entryType: LedgerEntryType.INITIAL_CREDIT }, _sum: { amount: true } });
-    const active = await prismaOne.reservation.aggregate({ where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE }, _sum: { amount: true } });
+    const events = await prismaOne.processedBankEvent.findMany({
+      where: { bankEventId: 'bank-event-001' },
+    });
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'reconciled-payment' },
+    });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: 'reconciled-payment' },
+    });
+    const settlementEntries = await prismaOne.ledgerEntry.count({
+      where: {
+        paymentId: 'reconciled-payment',
+        entryType: LedgerEntryType.SETTLEMENT,
+      },
+    });
+    const posted = await prismaOne.ledgerEntry.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        entryType: LedgerEntryType.INITIAL_CREDIT,
+      },
+      _sum: { amount: true },
+    });
+    const active = await prismaOne.reservation.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        status: ReservationStatus.ACTIVE,
+      },
+      _sum: { amount: true },
+    });
     const postedBalance = BigInt(posted._sum.amount ?? 0);
     const available = postedBalance - BigInt(active._sum.amount ?? 0);
 
     expect(first).toEqual(second);
-    expect(events).toEqual([expect.objectContaining({ id: first.id, bankEventId: 'bank-event-001', paymentId: 'reconciled-payment', eventType: 'SETTLED', eventTimestamp: timestamp })]);
+    expect(events).toEqual([
+      expect.objectContaining({
+        id: first.id,
+        bankEventId: 'bank-event-001',
+        paymentId: 'reconciled-payment',
+        eventType: 'SETTLED',
+        eventTimestamp: timestamp,
+      }),
+    ]);
     expect(payment.status).toBe(PaymentStatus.SETTLED);
     expect(reservation.status).toBe(ReservationStatus.SETTLED);
     expect(settlementEntries).toBe(1);
@@ -5187,19 +5963,33 @@ describe('Outbox worker (integration)', () => {
     });
     await prismaOne.payment.create({
       data: {
-        id: 'end-to-end-payment', merchantId: 'merchant-1',
-        idempotencyKey: 'end-to-end-payment-idem', requestFingerprint: 'end-to-end-payment-fingerprint',
-        externalReference: 'end-to-end-payment-reference', direction: PaymentDirection.CREDIT,
-        amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc',
-        receiverAccountRef: 'end-to-end-payment-account', routingNumber: '021000021',
-        status: PaymentStatus.RECEIVED, createdAt,
+        id: 'end-to-end-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'end-to-end-payment-idem',
+        requestFingerprint: 'end-to-end-payment-fingerprint',
+        externalReference: 'end-to-end-payment-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'end-to-end-payment-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.RECEIVED,
+        createdAt,
       },
     });
     await prismaOne.outboxEvent.create({
       data: {
-        id: 'end-to-end-payment-event', eventType: OutboxEventType.PAYMENT_RECEIVED,
-        aggregateType: 'PAYMENT', aggregateId: 'end-to-end-payment',
-        payload: { ...paymentPayload('end-to-end-payment'), direction: PaymentDirection.CREDIT, amountCents: '4000', createdAt: createdAt.toISOString() },
+        id: 'end-to-end-payment-event',
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'end-to-end-payment',
+        payload: {
+          ...paymentPayload('end-to-end-payment'),
+          direction: PaymentDirection.CREDIT,
+          amountCents: '4000',
+          createdAt: createdAt.toISOString(),
+        },
         availableAt: new Date(0),
       },
     });
@@ -5209,20 +5999,50 @@ describe('Outbox worker (integration)', () => {
     const lifecycle = new PaymentLifecycleRepository(prismaOne);
     const validation = new PaymentValidationService(lifecycle);
     await validation.validate('end-to-end-payment', claimedEvent.id);
-    const settled = await lifecycle.settleReservationForPayment('end-to-end-payment');
+    const generated = await new NachaFileGeneratorService(prismaOne).generate(
+      createdAt,
+    );
+    expect(generated).not.toBeNull();
+    const settled =
+      await lifecycle.settleReservationForPayment('end-to-end-payment');
     const reconciled = await lifecycle.processBankSettlementEvent({
-      bankEventId: 'end-to-end-bank-event', paymentId: 'end-to-end-payment', eventType: 'SETTLED',
+      bankEventId: 'end-to-end-bank-event',
+      paymentId: 'end-to-end-payment',
+      eventType: 'SETTLED',
       eventTimestamp: new Date('2026-07-29T13:00:00.000Z'),
     });
-    const returned = await lifecycle.returnSettlementForPayment('end-to-end-payment', 'R01');
+    const returned = await lifecycle.returnSettlementForPayment(
+      'end-to-end-payment',
+      'R01',
+    );
 
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'end-to-end-payment' } });
-    const reservation = await prismaOne.reservation.findUniqueOrThrow({ where: { paymentId: 'end-to-end-payment' } });
-    const ledgerCounts = await prismaOne.ledgerEntry.groupBy({ by: ['entryType'], where: { paymentId: 'end-to-end-payment' }, _count: { _all: true } });
-    const processedEvents = await prismaOne.processedBankEvent.findMany({ where: { bankEventId: 'end-to-end-bank-event' } });
-    const outbox = await prismaOne.outboxEvent.findUniqueOrThrow({ where: { id: 'end-to-end-payment-event' } });
-    const posted = await prismaOne.$queryRaw<{ total: bigint | null }[]>(Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`);
-    const active = await prismaOne.reservation.aggregate({ where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE }, _sum: { amount: true } });
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'end-to-end-payment' },
+    });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: 'end-to-end-payment' },
+    });
+    const ledgerCounts = await prismaOne.ledgerEntry.groupBy({
+      by: ['entryType'],
+      where: { paymentId: 'end-to-end-payment' },
+      _count: { _all: true },
+    });
+    const processedEvents = await prismaOne.processedBankEvent.findMany({
+      where: { bankEventId: 'end-to-end-bank-event' },
+    });
+    const outbox = await prismaOne.outboxEvent.findUniqueOrThrow({
+      where: { id: 'end-to-end-payment-event' },
+    });
+    const posted = await prismaOne.$queryRaw<{ total: bigint | null }[]>(
+      Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
+    );
+    const active = await prismaOne.reservation.aggregate({
+      where: {
+        fundingAccountId: 'funding-account-1',
+        status: ReservationStatus.ACTIVE,
+      },
+      _sum: { amount: true },
+    });
     const postedBalance = BigInt(posted[0]?.total ?? 0);
     const activeReserved = BigInt(active._sum.amount ?? 0);
 
@@ -5231,14 +6051,28 @@ describe('Outbox worker (integration)', () => {
     expect(returned.status).toBe(ReservationStatus.RETURNED);
     expect(payment).toMatchObject({ status: PaymentStatus.RETURNED });
     expect(payment.validatedAt).toBeInstanceOf(Date);
-    expect(reservation).toMatchObject({ status: ReservationStatus.RETURNED, returnCode: 'R01' });
+    expect(reservation).toMatchObject({
+      status: ReservationStatus.RETURNED,
+      returnCode: 'R01',
+    });
     expect(reservation.settledAt).toBeInstanceOf(Date);
     expect(reservation.returnedAt).toBeInstanceOf(Date);
-    expect(ledgerCounts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ entryType: LedgerEntryType.RESERVATION, _count: { _all: 1 } }),
-      expect.objectContaining({ entryType: LedgerEntryType.SETTLEMENT, _count: { _all: 1 } }),
-      expect.objectContaining({ entryType: LedgerEntryType.RETURN, _count: { _all: 1 } }),
-    ]));
+    expect(ledgerCounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entryType: LedgerEntryType.RESERVATION,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.SETTLEMENT,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.RETURN,
+          _count: { _all: 1 },
+        }),
+      ]),
+    );
     expect(await prismaOne.ledgerEntry.count()).toBe(4);
     expect(processedEvents).toHaveLength(1);
     expect(postedBalance).toBe(BigInt(14_000));
@@ -5257,7 +6091,7 @@ describe('Outbox worker (integration)', () => {
     });
     const publishAttempts: string[] = [];
     const publisher = {
-      handle: async (event: { id: string }): Promise<void> => {
+      handle: (event: { id: string }): void => {
         publishAttempts.push(event.id);
       },
     };
@@ -5272,7 +6106,10 @@ describe('Outbox worker (integration)', () => {
         eventType: OutboxEventType.PAYMENT_RECEIVED,
         aggregateType: 'TEST',
         aggregateId: 'publish-retry-aggregate-001',
-        payload: { eventId: 'publish-retry-event-001', kind: 'deterministic-test' },
+        payload: {
+          eventId: 'publish-retry-event-001',
+          kind: 'deterministic-test',
+        },
         status: OutboxEventStatus.PENDING,
         availableAt: new Date(0),
       },
@@ -5330,25 +6167,48 @@ describe('Outbox worker (integration)', () => {
     });
     await prismaOne.payment.create({
       data: {
-        id: 'retry-bank-event-payment', merchantId: 'merchant-1',
-        idempotencyKey: 'retry-bank-event-payment-idem', requestFingerprint: 'retry-bank-event-payment-fingerprint',
-        externalReference: 'retry-bank-event-payment-reference', direction: PaymentDirection.CREDIT,
-        amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc',
-        receiverAccountRef: 'retry-bank-event-payment-account', routingNumber: '021000021',
-        status: PaymentStatus.SETTLED, validatedAt: timestamp, createdAt: timestamp,
+        id: 'retry-bank-event-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'retry-bank-event-payment-idem',
+        requestFingerprint: 'retry-bank-event-payment-fingerprint',
+        externalReference: 'retry-bank-event-payment-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'retry-bank-event-payment-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SETTLED,
+        validatedAt: timestamp,
+        createdAt: timestamp,
       },
     });
     await prismaOne.reservation.create({
       data: {
-        id: 'retry-bank-event-reservation', paymentId: 'retry-bank-event-payment',
-        fundingAccountId: 'funding-account-1', amount: BigInt(4_000),
-        status: ReservationStatus.SETTLED, settledAt: timestamp,
+        id: 'retry-bank-event-reservation',
+        paymentId: 'retry-bank-event-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(4_000),
+        status: ReservationStatus.SETTLED,
+        settledAt: timestamp,
       },
     });
     await prismaOne.ledgerEntry.createMany({
       data: [
-        { entryKey: 'reservation:retry-bank-event-payment', fundingAccountId: 'funding-account-1', paymentId: 'retry-bank-event-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(4_000) },
-        { entryKey: 'settlement:retry-bank-event-payment', fundingAccountId: 'funding-account-1', paymentId: 'retry-bank-event-payment', entryType: LedgerEntryType.SETTLEMENT, amount: BigInt(4_000) },
+        {
+          entryKey: 'reservation:retry-bank-event-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'retry-bank-event-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'settlement:retry-bank-event-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'retry-bank-event-payment',
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: BigInt(4_000),
+        },
       ],
     });
 
@@ -5368,7 +6228,9 @@ describe('Outbox worker (integration)', () => {
         },
         'afterBankSettlementEventPersisted',
       )
-      .mockRejectedValueOnce(new Error('controlled bank settlement transaction failure'));
+      .mockRejectedValueOnce(
+        new Error('controlled bank settlement transaction failure'),
+      );
 
     let firstError: unknown;
     try {
@@ -5380,9 +6242,15 @@ describe('Outbox worker (integration)', () => {
     }
 
     expect(firstError).toEqual(
-      expect.objectContaining({ message: 'controlled bank settlement transaction failure' }),
+      expect.objectContaining({
+        message: 'controlled bank settlement transaction failure',
+      }),
     );
-    expect(await prismaOne.processedBankEvent.count({ where: { bankEventId: event.bankEventId } })).toBe(0);
+    expect(
+      await prismaOne.processedBankEvent.count({
+        where: { bankEventId: event.bankEventId },
+      }),
+    ).toBe(0);
 
     const second = await lifecycle.processBankSettlementEvent(event);
     const processedEvents = await prismaOne.processedBankEvent.findMany({
@@ -5403,20 +6271,35 @@ describe('Outbox worker (integration)', () => {
       Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
     );
     const activeReservations = await prismaOne.reservation.aggregate({
-      where: { fundingAccountId: 'funding-account-1', status: ReservationStatus.ACTIVE },
+      where: {
+        fundingAccountId: 'funding-account-1',
+        status: ReservationStatus.ACTIVE,
+      },
       _sum: { amount: true },
     });
     const postedBalance = BigInt(posted[0]?.total ?? 0);
-    const availableBalance = postedBalance - BigInt(activeReservations._sum.amount ?? 0);
+    const availableBalance =
+      postedBalance - BigInt(activeReservations._sum.amount ?? 0);
 
-    expect(second).toMatchObject({ bankEventId: event.bankEventId, paymentId: event.paymentId });
+    expect(second).toMatchObject({
+      bankEventId: event.bankEventId,
+      paymentId: event.paymentId,
+    });
     expect(processedEvents).toHaveLength(1);
     expect(reservation.status).toBe(ReservationStatus.SETTLED);
     expect(payment.status).toBe(PaymentStatus.SETTLED);
-    expect(ledgerCounts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ entryType: LedgerEntryType.RESERVATION, _count: { _all: 1 } }),
-      expect.objectContaining({ entryType: LedgerEntryType.SETTLEMENT, _count: { _all: 1 } }),
-    ]));
+    expect(ledgerCounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entryType: LedgerEntryType.RESERVATION,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.SETTLEMENT,
+          _count: { _all: 1 },
+        }),
+      ]),
+    );
     expect(await prismaOne.ledgerEntry.count()).toBe(3);
     expect(postedBalance).toBe(BigInt(10_000));
     expect(availableBalance).toBe(BigInt(10_000));
@@ -5428,40 +6311,124 @@ describe('Outbox worker (integration)', () => {
     const settledAt = new Date('2026-07-29T12:00:00.000Z');
     const returnedAt = new Date('2026-07-29T13:00:00.000Z');
     const eventTimestamp = new Date('2026-07-29T14:00:00.000Z');
-    await prismaOne.ledgerEntry.update({ where: { entryKey: 'initial-credit:merchant-1' }, data: { amount: BigInt(10_000) } });
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
     await prismaOne.payment.create({
-      data: { id: 'late-bank-settlement-payment', merchantId: 'merchant-1', idempotencyKey: 'late-bank-settlement-payment-idem', requestFingerprint: 'late-bank-settlement-payment-fingerprint', externalReference: 'late-bank-settlement-payment-reference', direction: PaymentDirection.CREDIT, amountCents: BigInt(4_000), currency: 'USD', receiverName: 'Receiver Inc', receiverAccountRef: 'late-bank-settlement-payment-account', routingNumber: '021000021', status: PaymentStatus.RETURNED, validatedAt: settledAt, createdAt: settledAt },
+      data: {
+        id: 'late-bank-settlement-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'late-bank-settlement-payment-idem',
+        requestFingerprint: 'late-bank-settlement-payment-fingerprint',
+        externalReference: 'late-bank-settlement-payment-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'late-bank-settlement-payment-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.RETURNED,
+        validatedAt: settledAt,
+        createdAt: settledAt,
+      },
     });
     await prismaOne.reservation.create({
-      data: { id: 'late-bank-settlement-reservation', paymentId: 'late-bank-settlement-payment', fundingAccountId: 'funding-account-1', amount: BigInt(4_000), status: ReservationStatus.RETURNED, settledAt, returnedAt, returnCode: 'R01' },
+      data: {
+        id: 'late-bank-settlement-reservation',
+        paymentId: 'late-bank-settlement-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(4_000),
+        status: ReservationStatus.RETURNED,
+        settledAt,
+        returnedAt,
+        returnCode: 'R01',
+      },
     });
     await prismaOne.ledgerEntry.createMany({
       data: [
-        { entryKey: 'reservation:late-bank-settlement-payment', fundingAccountId: 'funding-account-1', paymentId: 'late-bank-settlement-payment', entryType: LedgerEntryType.RESERVATION, amount: BigInt(4_000) },
-        { entryKey: 'settlement:late-bank-settlement-payment', fundingAccountId: 'funding-account-1', paymentId: 'late-bank-settlement-payment', entryType: LedgerEntryType.SETTLEMENT, amount: BigInt(4_000) },
-        { entryKey: 'return:late-bank-settlement-payment', fundingAccountId: 'funding-account-1', paymentId: 'late-bank-settlement-payment', entryType: LedgerEntryType.RETURN, amount: BigInt(4_000) },
+        {
+          entryKey: 'reservation:late-bank-settlement-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'late-bank-settlement-payment',
+          entryType: LedgerEntryType.RESERVATION,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'settlement:late-bank-settlement-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'late-bank-settlement-payment',
+          entryType: LedgerEntryType.SETTLEMENT,
+          amount: BigInt(4_000),
+        },
+        {
+          entryKey: 'return:late-bank-settlement-payment',
+          fundingAccountId: 'funding-account-1',
+          paymentId: 'late-bank-settlement-payment',
+          entryType: LedgerEntryType.RETURN,
+          amount: BigInt(4_000),
+        },
       ],
     });
     const lifecycle = new PaymentLifecycleRepository(prismaOne);
     const usageBefore = await prismaOne.merchantDailyUsage.count();
     const outboxBefore = await prismaOne.outboxEvent.count();
-    const balancesBefore = await prismaOne.$queryRaw<{ total: bigint | null }[]>(Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`);
-    const result = await lifecycle.processBankSettlementEvent({ bankEventId: 'late-bank-settlement-event', paymentId: 'late-bank-settlement-payment', eventType: 'SETTLED', eventTimestamp });
-    const events = await prismaOne.processedBankEvent.findMany({ where: { bankEventId: 'late-bank-settlement-event' } });
-    const reservation = await prismaOne.reservation.findUniqueOrThrow({ where: { paymentId: 'late-bank-settlement-payment' } });
-    const payment = await prismaOne.payment.findUniqueOrThrow({ where: { id: 'late-bank-settlement-payment' } });
-    const ledgerCounts = await prismaOne.ledgerEntry.groupBy({ by: ['entryType'], where: { paymentId: 'late-bank-settlement-payment' }, _count: { _all: true } });
-    const balancesAfter = await prismaOne.$queryRaw<{ total: bigint | null }[]>(Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`);
+    const balancesBefore = await prismaOne.$queryRaw<
+      { total: bigint | null }[]
+    >(
+      Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
+    );
+    const result = await lifecycle.processBankSettlementEvent({
+      bankEventId: 'late-bank-settlement-event',
+      paymentId: 'late-bank-settlement-payment',
+      eventType: 'SETTLED',
+      eventTimestamp,
+    });
+    const events = await prismaOne.processedBankEvent.findMany({
+      where: { bankEventId: 'late-bank-settlement-event' },
+    });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: 'late-bank-settlement-payment' },
+    });
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'late-bank-settlement-payment' },
+    });
+    const ledgerCounts = await prismaOne.ledgerEntry.groupBy({
+      by: ['entryType'],
+      where: { paymentId: 'late-bank-settlement-payment' },
+      _count: { _all: true },
+    });
+    const balancesAfter = await prismaOne.$queryRaw<{ total: bigint | null }[]>(
+      Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
+    );
 
-    expect(result).toMatchObject({ bankEventId: 'late-bank-settlement-event', paymentId: 'late-bank-settlement-payment' });
+    expect(result).toMatchObject({
+      bankEventId: 'late-bank-settlement-event',
+      paymentId: 'late-bank-settlement-payment',
+    });
     expect(events).toHaveLength(1);
-    expect(reservation).toMatchObject({ status: ReservationStatus.RETURNED, returnedAt, returnCode: 'R01' });
+    expect(reservation).toMatchObject({
+      status: ReservationStatus.RETURNED,
+      returnedAt,
+      returnCode: 'R01',
+    });
     expect(payment.status).toBe(PaymentStatus.RETURNED);
-    expect(ledgerCounts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ entryType: LedgerEntryType.RESERVATION, _count: { _all: 1 } }),
-      expect.objectContaining({ entryType: LedgerEntryType.SETTLEMENT, _count: { _all: 1 } }),
-      expect.objectContaining({ entryType: LedgerEntryType.RETURN, _count: { _all: 1 } }),
-    ]));
+    expect(ledgerCounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entryType: LedgerEntryType.RESERVATION,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.SETTLEMENT,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.RETURN,
+          _count: { _all: 1 },
+        }),
+      ]),
+    );
     expect(await prismaOne.ledgerEntry.count()).toBe(4);
     expect(BigInt(balancesBefore[0]?.total ?? 0)).toBe(BigInt(14_000));
     expect(BigInt(balancesAfter[0]?.total ?? 0)).toBe(BigInt(14_000));
@@ -5588,5 +6555,481 @@ describe('Outbox worker (integration)', () => {
       claimedAt: null,
       lastError: 'Previous worker claim expired',
     });
+  });
+
+  it('emits each payment lifecycle outbox event exactly once', async () => {
+    const createdAt = new Date('2026-07-29T12:00:00.000Z');
+    await prismaOne.payment.create({
+      data: {
+        id: 'lifecycle-outbox-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'lifecycle-outbox-idempotency',
+        requestFingerprint: 'lifecycle-outbox-fingerprint',
+        externalReference: 'lifecycle-outbox-reference',
+        direction: PaymentDirection.CREDIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'lifecycle-outbox-account',
+        routingNumber: '021000021',
+        createdAt,
+      },
+    });
+    await prismaOne.outboxEvent.create({
+      data: {
+        eventKey: 'payment:lifecycle-outbox-payment:PAYMENT_RECEIVED',
+        eventType: OutboxEventType.PAYMENT_RECEIVED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'lifecycle-outbox-payment',
+        payload: {
+          ...paymentPayload('lifecycle-outbox-payment'),
+          merchantId: 'merchant-1',
+          amountCents: '4000',
+          direction: PaymentDirection.CREDIT,
+        },
+        availableAt: new Date(0),
+      },
+    });
+
+    const [claimed] = await repositoryOne.claimPending(1);
+    const lifecycle = new PaymentLifecycleRepository(prismaOne);
+    const validation = new PaymentValidationService(lifecycle);
+    await validation.validate('lifecycle-outbox-payment', claimed.id);
+    await validation
+      .validate('lifecycle-outbox-payment', claimed.id)
+      .catch(() => undefined);
+    const generated = await new NachaFileGeneratorService(prismaOne).generate(
+      createdAt,
+    );
+    expect(generated).not.toBeNull();
+    await lifecycle.settleReservationForPayment('lifecycle-outbox-payment');
+    await lifecycle.settleReservationForPayment('lifecycle-outbox-payment');
+    await lifecycle.returnSettlementForPayment(
+      'lifecycle-outbox-payment',
+      'R01',
+    );
+    await lifecycle.returnSettlementForPayment(
+      'lifecycle-outbox-payment',
+      'R01',
+    );
+
+    const events = await prismaOne.outboxEvent.findMany({
+      where: { aggregateId: 'lifecycle-outbox-payment' },
+    });
+    const count = (type: OutboxEventType) =>
+      events.filter((event) => event.eventType === type).length;
+    const payment = await prismaOne.payment.findUniqueOrThrow({
+      where: { id: 'lifecycle-outbox-payment' },
+    });
+    const reservation = await prismaOne.reservation.findUniqueOrThrow({
+      where: { paymentId: payment.id },
+    });
+    const ledger = await prismaOne.ledgerEntry.groupBy({
+      by: ['entryType'],
+      where: { paymentId: payment.id },
+      _count: { _all: true },
+    });
+
+    expect(count(OutboxEventType.PAYMENT_RECEIVED)).toBe(1);
+    expect(count(OutboxEventType.PAYMENT_VALIDATED)).toBe(1);
+    expect(count(OutboxEventType.PAYMENT_VALIDATION_FAILED)).toBe(0);
+    expect(count(OutboxEventType.PAYMENT_RESERVED)).toBe(1);
+    expect(count(OutboxEventType.PAYMENT_SUBMITTED)).toBe(1);
+    expect(count(OutboxEventType.PAYMENT_SETTLED)).toBe(1);
+    expect(count(OutboxEventType.PAYMENT_RETURNED)).toBe(1);
+    expect(events).toHaveLength(6);
+    expect(new Set(events.map((event) => event.eventKey)).size).toBe(6);
+    for (const event of events) {
+      const payload = event.payload as {
+        paymentId: string;
+        merchantId: string;
+        amountCents: string;
+      };
+      expect(payload.paymentId).toBe(payment.id);
+      expect(payload.merchantId).toBe('merchant-1');
+      expect(payload.amountCents).toBe('4000');
+    }
+    expect(
+      events.find(
+        (event) => event.eventType === OutboxEventType.PAYMENT_RETURNED,
+      )?.payload,
+    ).toMatchObject({ returnCode: 'R01' });
+    expect(payment.status).toBe(PaymentStatus.RETURNED);
+    expect(reservation.status).toBe(ReservationStatus.RETURNED);
+    expect(ledger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entryType: LedgerEntryType.RESERVATION,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.SETTLEMENT,
+          _count: { _all: 1 },
+        }),
+        expect.objectContaining({
+          entryType: LedgerEntryType.RETURN,
+          _count: { _all: 1 },
+        }),
+      ]),
+    );
+  });
+
+  it('materializes one webhook delivery per active endpoint exactly once', async () => {
+    await prismaOne.payment.create({
+      data: {
+        id: 'webhook-materialized-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'webhook-materialized-idem',
+        requestFingerprint: 'webhook-materialized-fingerprint',
+        externalReference: 'webhook-materialized-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(4_000),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'webhook-materialized-account',
+        routingNumber: '021000021',
+      },
+    });
+    const endpoints = await Promise.all([
+      prismaOne.merchantWebhookEndpoint.create({
+        data: {
+          id: 'webhook-active-one',
+          merchantId: 'merchant-1',
+          url: 'https://one.example.test',
+          encryptedSigningSecret: 'cipher-one',
+          signingSecretIv: 'iv-one',
+          signingSecretAuthTag: 'tag-one',
+          signingSecretKeyVersion: 'v1',
+        },
+      }),
+      prismaOne.merchantWebhookEndpoint.create({
+        data: {
+          id: 'webhook-active-two',
+          merchantId: 'merchant-1',
+          url: 'https://two.example.test',
+          encryptedSigningSecret: 'cipher-two',
+          signingSecretIv: 'iv-two',
+          signingSecretAuthTag: 'tag-two',
+          signingSecretKeyVersion: 'v1',
+        },
+      }),
+      prismaOne.merchantWebhookEndpoint.create({
+        data: {
+          id: 'webhook-inactive',
+          merchantId: 'merchant-1',
+          url: 'https://inactive.example.test',
+          encryptedSigningSecret: 'cipher-three',
+          signingSecretIv: 'iv-three',
+          signingSecretAuthTag: 'tag-three',
+          signingSecretKeyVersion: 'v1',
+          isActive: false,
+        },
+      }),
+    ]);
+    const event = await prismaOne.outboxEvent.create({
+      data: {
+        eventKey: 'payment:webhook-materialized-payment:PAYMENT_VALIDATED',
+        eventType: OutboxEventType.PAYMENT_VALIDATED,
+        aggregateType: 'PAYMENT',
+        aggregateId: 'webhook-materialized-payment',
+        payload: {
+          paymentId: 'webhook-materialized-payment',
+          merchantId: 'merchant-1',
+          paymentStatus: 'VALIDATED',
+          amountCents: '4000',
+          currency: 'USD',
+          direction: 'DEBIT',
+          validationCode: null,
+          returnCode: null,
+          occurredAt: '2026-07-29T12:00:00.000Z',
+        },
+      },
+    });
+    const materializerOne = new WebhookDeliveryMaterializerService(prismaOne);
+    const materializerTwo = new WebhookDeliveryMaterializerService(prismaTwo);
+    await materializerOne.materialize(event);
+    await materializerOne.materialize(event);
+    await Promise.all([
+      materializerOne.materialize(event),
+      materializerTwo.materialize(event),
+    ]);
+    const deliveries = await prismaOne.webhookDelivery.findMany({
+      where: { outboxEventId: event.id },
+      orderBy: { webhookEndpointId: 'asc' },
+    });
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.map((delivery) => delivery.webhookEndpointId)).toEqual(
+      endpoints
+        .slice(0, 2)
+        .map((endpoint) => endpoint.id)
+        .sort(),
+    );
+    expect(
+      deliveries.every(
+        (delivery) =>
+          delivery.status === 'PENDING' &&
+          delivery.attemptCount === 0 &&
+          delivery.nextAttemptAt instanceof Date,
+      ),
+    ).toBe(true);
+    expect(new Set(deliveries.map((delivery) => delivery.eventId)).size).toBe(
+      2,
+    );
+    expect(
+      deliveries.every(
+        (delivery) =>
+          (delivery.payload as { type: string; data: { amountCents: string } })
+            .type === 'payment.validated' &&
+          (delivery.payload as { data: { amountCents: string } }).data
+            .amountCents === '4000',
+      ),
+    ).toBe(true);
+    expect(
+      await prismaOne.webhookDelivery.count({
+        where: { webhookEndpointId: 'webhook-inactive' },
+      }),
+    ).toBe(0);
+    expect(await prismaOne.outboxEvent.count()).toBe(1);
+    expect(await prismaOne.payment.count()).toBe(1);
+    expect(await prismaOne.reservation.count()).toBe(0);
+    expect(await prismaOne.ledgerEntry.count()).toBe(1);
+  });
+
+  it('retries a merchant webhook and marks it delivered exactly once', async () => {
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString(
+      'base64',
+    );
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION = 'test-v1';
+    const secret = 'webhook-test-signing-secret';
+    const requests: Array<{
+      headers: Record<string, string | string[] | undefined>;
+      body: string;
+    }> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on('end', () => {
+        requests.push({ headers: req.headers, body });
+        res.statusCode = requests.length === 1 ? 500 : 200;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as { port: number }).port;
+    try {
+      const crypto = new WebhookSecretCryptoService({
+        get: (key: string) => process.env[key],
+      } as never);
+      const endpointService = new MerchantWebhookEndpointsService(
+        prismaOne,
+        crypto,
+        { get: () => 'test' } as never,
+      );
+      const endpoint = await endpointService.create(
+        'merchant-1',
+        `http://127.0.0.1:${port}/webhook`,
+        secret,
+      );
+      await prismaOne.payment.create({
+        data: {
+          id: 'webhook-retry-payment',
+          merchantId: 'merchant-1',
+          idempotencyKey: 'webhook-retry-idem',
+          requestFingerprint: 'webhook-retry-fingerprint',
+          externalReference: 'webhook-retry-reference',
+          direction: PaymentDirection.DEBIT,
+          amountCents: BigInt(4_000),
+          currency: 'USD',
+          receiverName: 'Receiver Inc',
+          receiverAccountRef: 'webhook-retry-account',
+          routingNumber: '021000021',
+        },
+      });
+      const event = await prismaOne.outboxEvent.create({
+        data: {
+          eventKey: 'payment:webhook-retry-payment:PAYMENT_VALIDATED',
+          eventType: OutboxEventType.PAYMENT_VALIDATED,
+          aggregateType: 'PAYMENT',
+          aggregateId: 'webhook-retry-payment',
+          payload: {
+            paymentId: 'webhook-retry-payment',
+            merchantId: 'merchant-1',
+            paymentStatus: 'VALIDATED',
+            amountCents: '4000',
+            currency: 'USD',
+            direction: 'DEBIT',
+            validationCode: null,
+            returnCode: null,
+            occurredAt: '2026-07-30T12:00:00.000Z',
+          },
+        },
+      });
+      await new WebhookDeliveryMaterializerService(prismaOne).materialize(
+        event,
+      );
+      const materialized = await prismaOne.webhookDelivery.findUniqueOrThrow({
+        where: {
+          webhookEndpointId_outboxEventId: {
+            webhookEndpointId: endpoint.id,
+            outboxEventId: event.id,
+          },
+        },
+      });
+      await prismaOne.webhookDelivery.update({
+        where: { id: materialized.id },
+        data: { nextAttemptAt: new Date(0) },
+      });
+      const config = new WorkerConfigService({
+        ...process.env,
+        DATABASE_URL: process.env.DATABASE_URL!,
+        WEBHOOK_BATCH_SIZE: '1',
+        WEBHOOK_INITIAL_RETRY_SECONDS: '1',
+        WEBHOOK_MAX_RETRY_SECONDS: '1',
+        WEBHOOK_REQUEST_TIMEOUT_MS: '1000',
+        WEBHOOK_WORKER_ID: 'test-worker',
+      });
+      const processor = new WebhookDeliveryProcessorService(prismaOne, config);
+      await processor.processOnce();
+      let delivery = await prismaOne.webhookDelivery.findUniqueOrThrow({
+        where: {
+          webhookEndpointId_outboxEventId: {
+            webhookEndpointId: endpoint.id,
+            outboxEventId: event.id,
+          },
+        },
+      });
+      expect(delivery).toMatchObject({
+        status: 'PENDING',
+        attemptCount: 1,
+        responseStatus: 500,
+        deliveredAt: null,
+        claimedAt: null,
+        claimedBy: null,
+      });
+      expect(delivery.nextAttemptAt).toBeInstanceOf(Date);
+      await prismaOne.webhookDelivery.update({
+        where: { id: delivery.id },
+        data: { nextAttemptAt: new Date(0) },
+      });
+      await processor.processOnce();
+      delivery = await prismaOne.webhookDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+      });
+      expect(delivery).toMatchObject({
+        status: 'DELIVERED',
+        attemptCount: 2,
+        responseStatus: 200,
+        claimedAt: null,
+        claimedBy: null,
+        nextAttemptAt: null,
+      });
+      expect(delivery.deliveredAt).toBeInstanceOf(Date);
+      await processor.processOnce();
+      expect(requests).toHaveLength(2);
+      expect(await prismaOne.webhookDelivery.count()).toBe(1);
+      for (const request of requests) {
+        const timestamp = request.headers['x-achflow-timestamp'] as string;
+        const signature = request.headers['x-achflow-signature'] as string;
+        expect(request.headers['x-achflow-event-id']).toBe(delivery.eventId);
+        expect(signature).toBe(
+          `v1=${createHmac('sha256', secret).update(`${timestamp}.${request.body}`).digest('hex')}`,
+        );
+        expect(request.headers['content-type']).toContain('application/json');
+        const payload = JSON.parse(request.body) as {
+          data: { amountCents: string };
+        };
+        expect(payload.data.amountCents).toBe('4000');
+      }
+      expect(await prismaOne.outboxEvent.count()).toBe(1);
+      expect(await prismaOne.payment.count()).toBe(1);
+      expect(await prismaOne.reservation.count()).toBe(0);
+      expect(await prismaOne.ledgerEntry.count()).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('generates one NACHA file containing eligible ACH payments exactly once', async () => {
+    const date = new Date('2026-07-30T00:00:00.000Z');
+    const rows = [
+      ['nacha-debit-one', PaymentDirection.DEBIT, BigInt(1200), '021000021'],
+      ['nacha-debit-two', PaymentDirection.DEBIT, BigInt(2300), '011000015'],
+      ['nacha-credit-one', PaymentDirection.CREDIT, BigInt(3400), '031000503'],
+    ] as const;
+    await prismaOne.payment.createMany({
+      data: rows.map(([id, direction, amountCents, routingNumber]) => ({
+        id,
+        merchantId: 'merchant-1',
+        idempotencyKey: `${id}-idem`,
+        requestFingerprint: `${id}-fingerprint`,
+        externalReference: `${id}-reference`,
+        direction,
+        amountCents,
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: `${id}-account`,
+        routingNumber,
+        status: PaymentStatus.VALIDATED,
+        validatedAt: date,
+      })),
+    });
+    const generator = new NachaFileGeneratorService(prismaOne);
+    const first = await generator.generate(date);
+    expect(first).not.toBeNull();
+    const generated = first!;
+    const records = generated.file.split('\n');
+    const file = await prismaOne.achFile.findUniqueOrThrow({
+      where: { id: generated.metadata.id },
+    });
+    const exported = await prismaOne.payment.findMany({
+      where: { id: { in: rows.map(([id]) => id) } },
+      orderBy: { id: 'asc' },
+    });
+    expect(await prismaOne.achFile.count()).toBe(1);
+    expect(
+      exported.every(
+        (payment) =>
+          payment.exportedAt &&
+          payment.achFileId === file.id &&
+          payment.status === PaymentStatus.SUBMITTED,
+      ),
+    ).toBe(true);
+    expect(records.every((record) => record.length === 94)).toBe(true);
+    expect(records.length % 10).toBe(0);
+    expect(records[0][0]).toBe('1');
+    expect(records.filter((record) => record[0] === '6')).toHaveLength(3);
+    expect(records.some((record) => record[0] === '5')).toBe(true);
+    expect(records.filter((record) => record[0] === '8')).toHaveLength(2);
+    expect(records.at(-1)).toBe('9'.repeat(94));
+    expect(file).toMatchObject({
+      totalEntries: 3,
+      debitTotalCents: BigInt(3500),
+      creditTotalCents: BigInt(3400),
+      entryHash: (
+        (BigInt('02100002') + BigInt('01100001') + BigInt('03100050')) %
+        BigInt(10_000_000_000)
+      ).toString(),
+    });
+    expect(file.sha256).toBe(
+      createHash('sha256').update(generated.file).digest('hex'),
+    );
+    expect(
+      records
+        .find((record) => record[0] === '9' && record !== '9'.repeat(94))
+        ?.slice(7, 13),
+    ).toBe(String(records.length / 10).padStart(6, '0'));
+    expect(await generator.generate(date)).toBeNull();
+    expect(await prismaOne.achFile.count()).toBe(1);
+    expect(
+      await prismaOne.outboxEvent.count({
+        where: { eventType: OutboxEventType.PAYMENT_SUBMITTED },
+      }),
+    ).toBe(3);
+    expect(await prismaOne.reservation.count()).toBe(0);
+    expect(await prismaOne.ledgerEntry.count()).toBe(1);
   });
 });

@@ -27,12 +27,34 @@ enum PaymentStatus {
 
 enum OutboxEventType {
   PAYMENT_RECEIVED
+  PAYMENT_VALIDATED
+  PAYMENT_VALIDATION_FAILED
+  PAYMENT_RESERVED
+  PAYMENT_SUBMITTED
+  PAYMENT_SETTLED
+  PAYMENT_RETURNED
+  WEBHOOK_TEST
 }
 
 enum OutboxEventStatus {
   PENDING
   PROCESSING
   PROCESSED
+  FAILED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+}
+
+enum SimulatorRunStatus {
+  RUNNING
+  PAUSED
+  STOPPED
+  COMPLETED
   FAILED
 }
 
@@ -67,20 +89,51 @@ enum ReservationStatus {
 }
 
 model Merchant {
-  id               String               @id @default(uuid())
-  merchantCode     String               @unique
-  legalName        String
-  displayName      String
-  status           MerchantStatus       @default(ACTIVE)
-  allowAchDebit    Boolean              @default(false)
-  allowAchCredit   Boolean              @default(false)
-  perPaymentLimit  BigInt
-  dailyAmountLimit BigInt
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
-  payments         Payment[]
-  dailyUsage       MerchantDailyUsage[]
-  fundingAccounts  FundingAccount[]
+  id                 String                     @id @default(uuid())
+  merchantCode       String                     @unique
+  legalName          String
+  displayName        String
+  status             MerchantStatus             @default(ACTIVE)
+  allowAchDebit      Boolean                    @default(false)
+  allowAchCredit     Boolean                    @default(false)
+  perPaymentLimit    BigInt
+  dailyAmountLimit   BigInt
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  payments           Payment[]
+  dailyUsage         MerchantDailyUsage[]
+  fundingAccounts    FundingAccount[]
+  idempotencyRecords PaymentIdempotencyRecord[]
+  apiKey             MerchantApiKey?
+  webhookEndpoints   MerchantWebhookEndpoint[]
+  webhookDeliveries  WebhookDelivery[]
+}
+
+model MerchantWebhookEndpoint {
+  id                      String   @id @default(uuid())
+  merchantId              String
+  url                     String
+  encryptedSigningSecret  String
+  signingSecretIv         String
+  signingSecretAuthTag    String
+  signingSecretKeyVersion String
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  merchant   Merchant          @relation(fields: [merchantId], references: [id])
+  deliveries WebhookDelivery[]
+
+  @@index([merchantId, isActive])
+}
+
+model MerchantApiKey {
+  id           String   @id @default(uuid())
+  merchantId   String   @unique
+  hashedApiKey String   @unique
+  createdAt    DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
 }
 
 model FundingAccount {
@@ -162,13 +215,48 @@ model Payment {
   validatedAt        DateTime?
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
+  exportedAt         DateTime?
+  achFileId          String?
 
-  merchant Merchant @relation(fields: [merchantId], references: [id])
+  merchant             Merchant                  @relation(fields: [merchantId], references: [id])
   bankSettlementEvents ProcessedBankEvent[]
+  idempotencyRecord    PaymentIdempotencyRecord?
+  achFile              AchFile?                  @relation(fields: [achFileId], references: [id])
 
   @@index([status])
   @@index([createdAt])
   @@index([merchantId])
+}
+
+model AchFile {
+  id                 String    @id @default(uuid())
+  fileName           String    @unique
+  companyId          String
+  effectiveEntryDate DateTime  @db.Date
+  status             String
+  totalEntries       Int
+  debitTotalCents    BigInt
+  creditTotalCents   BigInt
+  entryHash          String
+  sha256             String
+  createdAt          DateTime  @default(now())
+  payments           Payment[]
+
+  @@index([companyId, effectiveEntryDate])
+}
+
+model PaymentIdempotencyRecord {
+  id                 String   @id @default(uuid())
+  merchantId         String
+  idempotencyKey     String
+  requestFingerprint String
+  paymentId          String   @unique
+  createdAt          DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+  payment  Payment  @relation(fields: [paymentId], references: [id])
+
+  @@unique([merchantId, idempotencyKey])
 }
 
 model ProcessedBankEvent {
@@ -187,6 +275,7 @@ model ProcessedBankEvent {
 
 model OutboxEvent {
   id            String            @id @default(uuid())
+  eventKey      String            @unique @default(uuid())
   eventType     OutboxEventType
   aggregateType String
   aggregateId   String
@@ -199,8 +288,60 @@ model OutboxEvent {
   lastError     String?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+  deliveries    WebhookDelivery[]
 
   @@index([status, availableAt])
   @@index([status, claimedAt])
   @@index([aggregateType, aggregateId])
+}
+
+model WebhookDelivery {
+  id                String                @id @default(uuid())
+  merchantId        String
+  webhookEndpointId String
+  outboxEventId     String
+  eventId           String                @unique
+  eventType         String
+  payload           Json
+  status            WebhookDeliveryStatus @default(PENDING)
+  attemptCount      Int                   @default(0)
+  nextAttemptAt     DateTime?             @default(now())
+  lastAttemptAt     DateTime?
+  deliveredAt       DateTime?
+  responseStatus    Int?
+  lastErrorCode     String?
+  claimedAt         DateTime?
+  claimedBy         String?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  merchant        Merchant                @relation(fields: [merchantId], references: [id])
+  webhookEndpoint MerchantWebhookEndpoint @relation(fields: [webhookEndpointId], references: [id])
+  outboxEvent     OutboxEvent             @relation(fields: [outboxEventId], references: [id])
+
+  @@unique([webhookEndpointId, outboxEventId])
+  @@index([status, nextAttemptAt])
+  @@index([claimedAt])
+  @@index([merchantId])
+  @@index([webhookEndpointId])
+}
+
+model SimulatorRun {
+  id                String             @id @default(uuid())
+  status            SimulatorRunStatus @default(RUNNING)
+  configuration     Json
+  merchantIds       Json
+  startedAt         DateTime           @default(now())
+  completedAt       DateTime?
+  generatedCount    Int                @default(0)
+  successfulCount   Int                @default(0)
+  failedCount       Int                @default(0)
+  returnedCount     Int                @default(0)
+  averageLatencyMs  Int                @default(0)
+  failureSummary    Json?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([createdAt])
+  @@index([status])
 }

@@ -11,9 +11,10 @@ export function mapCreatePaymentDtoToRecord(
   dto: CreatePaymentDto,
   requestFingerprint: string,
   merchantId: string,
+  idempotencyKey: string,
 ): CreatePaymentRecord {
   return {
-    idempotencyKey: dto.idempotencyKey,
+    idempotencyKey,
     requestFingerprint,
     externalReference: dto.externalReference,
     direction: dto.direction,

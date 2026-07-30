@@ -3,5 +3,7 @@ packages:
   - "packages/*"
 allowBuilds:
   '@prisma/engines': false
+  esbuild: true
   prisma: true
+  sharp: false
   unrs-resolver: false

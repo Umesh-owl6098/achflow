@@ -24,6 +24,8 @@ describe('PaymentsRepository', () => {
     status: 'RECEIVED' as const,
     failureCode: null,
     failureReason: null,
+    validationCode: null,
+    validationMessage: null,
     createdAt: new Date('2026-07-29T12:00:00.000Z'),
     updatedAt: new Date('2026-07-29T12:00:00.000Z'),
     merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
@@ -53,16 +55,20 @@ describe('PaymentsRepository', () => {
     });
     expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
       data: {
+        eventKey: `payment:${payment.id}:PAYMENT_RECEIVED`,
         eventType: OutboxEventType.PAYMENT_RECEIVED,
         aggregateType: 'PAYMENT',
         aggregateId: payment.id,
         payload: {
           paymentId: payment.id,
-          externalReference: payment.externalReference,
+          merchantId: payment.merchantId,
+          paymentStatus: payment.status,
           direction: payment.direction,
           amountCents: '2500',
           currency: payment.currency,
-          createdAt: payment.createdAt.toISOString(),
+          validationCode: payment.validationCode,
+          returnCode: null,
+          occurredAt: payment.createdAt.toISOString(),
         },
       },
     });

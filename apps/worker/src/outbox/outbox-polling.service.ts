@@ -76,8 +76,22 @@ export class OutboxPollingService
       await this.repository.markProcessed(event.id);
     } catch (error) {
       if (process.env.NODE_ENV !== 'production') {
-        const details = error as { code?: unknown; meta?: unknown; cause?: unknown };
-        this.logger.error(JSON.stringify({ event: 'outbox.processing.failed', errorName: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error), prismaCode: details.code, meta: details.meta, cause: details.cause, stack: error instanceof Error ? error.stack : undefined }));
+        const details = error as {
+          code?: unknown;
+          meta?: unknown;
+          cause?: unknown;
+        };
+        this.logger.error(
+          JSON.stringify({
+            event: 'outbox.processing.failed',
+            errorName: error instanceof Error ? error.name : typeof error,
+            message: error instanceof Error ? error.message : String(error),
+            prismaCode: details.code,
+            meta: details.meta,
+            cause: details.cause,
+            stack: error instanceof Error ? error.stack : undefined,
+          }),
+        );
       }
       await this.repository.markFailed(
         event,

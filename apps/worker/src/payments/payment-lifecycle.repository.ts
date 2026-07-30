@@ -3,6 +3,7 @@ import {
   MerchantStatus,
   FundingAccountStatus,
   LedgerEntryType,
+  OutboxEventType,
   PaymentDirection,
   PaymentStatus,
   Prisma,
@@ -10,6 +11,7 @@ import {
 } from '@prisma/client';
 import { OutboxProcessingError } from '../outbox/outbox-processing.error';
 import { WorkerPrismaService } from '../worker-prisma.service';
+import { paymentLifecycleOutboxEvent } from '../../../api/prisma/payment-lifecycle-event.factory';
 
 export type PaymentForValidation = {
   id: string;
@@ -19,6 +21,8 @@ export type PaymentForValidation = {
   currency: string;
   direction: PaymentDirection;
   externalReference: string | null;
+  validationCode: string | null;
+  validationMessage: string | null;
   createdAt: Date;
   receiverAccountRef: string;
   routingNumber: string;
@@ -61,6 +65,8 @@ export class PaymentLifecycleRepository {
         currency: true,
         direction: true,
         externalReference: true,
+        validationCode: true,
+        validationMessage: true,
         createdAt: true,
         receiverAccountRef: true,
         routingNumber: true,
@@ -81,9 +87,25 @@ export class PaymentLifecycleRepository {
     paymentId: string,
     result: ValidationResult,
   ): Promise<void> {
-    const update = await this.prisma.payment.updateMany({
-      where: { id: paymentId, status: PaymentStatus.RECEIVED },
-      data: this.transitionData(result),
+    const update = await this.prisma.$transaction(async (transaction) => {
+      const transitioned = await transaction.payment.updateMany({
+        where: { id: paymentId, status: PaymentStatus.RECEIVED },
+        data: this.transitionData(result),
+      });
+      if (transitioned.count !== 1) return transitioned;
+      const payment = await transaction.payment.findUniqueOrThrow({
+        where: { id: paymentId },
+      });
+      await transaction.outboxEvent.create({
+        data: paymentLifecycleOutboxEvent(
+          payment,
+          result.status === PaymentStatus.VALIDATED
+            ? OutboxEventType.PAYMENT_VALIDATED
+            : OutboxEventType.PAYMENT_VALIDATION_FAILED,
+          payment.updatedAt,
+        ),
+      });
+      return transitioned;
     });
 
     if (update.count === 1) {
@@ -163,7 +185,9 @@ export class PaymentLifecycleRepository {
         return reservation;
       }
       if (reservation.status !== ReservationStatus.ACTIVE) {
-        throw new OutboxProcessingError('Reservation is not active for settlement');
+        throw new OutboxProcessingError(
+          'Reservation is not active for settlement',
+        );
       }
 
       const settled = await transaction.reservation.update({
@@ -174,11 +198,13 @@ export class PaymentLifecycleRepository {
         },
       });
       const paymentUpdate = await transaction.payment.updateMany({
-        where: { id: paymentId, status: PaymentStatus.VALIDATED },
+        where: { id: paymentId, status: PaymentStatus.SUBMITTED },
         data: { status: PaymentStatus.SETTLED },
       });
       if (paymentUpdate.count !== 1) {
-        throw new OutboxProcessingError('Payment is not validated for settlement');
+        throw new OutboxProcessingError(
+          'Payment is not submitted for settlement',
+        );
       }
       await transaction.ledgerEntry.create({
         data: {
@@ -188,6 +214,16 @@ export class PaymentLifecycleRepository {
           entryType: LedgerEntryType.SETTLEMENT,
           amount: settled.amount,
         },
+      });
+      const payment = await transaction.payment.findUniqueOrThrow({
+        where: { id: paymentId },
+      });
+      await transaction.outboxEvent.create({
+        data: paymentLifecycleOutboxEvent(
+          payment,
+          OutboxEventType.PAYMENT_SETTLED,
+          payment.updatedAt,
+        ),
       });
 
       return settled;
@@ -210,7 +246,9 @@ export class PaymentLifecycleRepository {
         return reservation;
       }
       if (reservation.status !== ReservationStatus.SETTLED) {
-        throw new OutboxProcessingError('Reservation is not settled for return');
+        throw new OutboxProcessingError(
+          'Reservation is not settled for return',
+        );
       }
 
       const returned = await transaction.reservation.update({
@@ -240,6 +278,17 @@ export class PaymentLifecycleRepository {
           amount: returned.amount,
         },
       });
+      const payment = await transaction.payment.findUniqueOrThrow({
+        where: { id: paymentId },
+      });
+      await transaction.outboxEvent.create({
+        data: paymentLifecycleOutboxEvent(
+          payment,
+          OutboxEventType.PAYMENT_RETURNED,
+          payment.updatedAt,
+          returned.returnCode,
+        ),
+      });
 
       return returned;
     });
@@ -261,14 +310,18 @@ export class PaymentLifecycleRepository {
         select: { id: true, status: true },
       });
       if (!payment) {
-        throw new OutboxProcessingError('Payment not found for bank settlement event');
+        throw new OutboxProcessingError(
+          'Payment not found for bank settlement event',
+        );
       }
       if (
         event.eventType !== 'SETTLED' ||
         (payment.status !== PaymentStatus.SETTLED &&
           payment.status !== PaymentStatus.RETURNED)
       ) {
-        throw new OutboxProcessingError('Payment is not settled for bank settlement event');
+        throw new OutboxProcessingError(
+          'Payment is not settled for bank settlement event',
+        );
       }
       const processedEvent = await transaction.processedBankEvent.create({
         data: event,
@@ -299,14 +352,21 @@ export class PaymentLifecycleRepository {
       if (!current) {
         throw new OutboxProcessingError('Payment not found for validation');
       }
-      if (
-        current.status === PaymentStatus.VALIDATED ||
-        current.status === PaymentStatus.VALIDATION_FAILED
-      ) {
+      if (current.status !== PaymentStatus.RECEIVED) {
         await this.completeOutbox(transaction, outboxEventId);
-        return { status: current.status, code: null, message: null };
+        return current.status === PaymentStatus.VALIDATION_FAILED
+          ? {
+              status: PaymentStatus.VALIDATION_FAILED,
+              code: payment.validationCode,
+              message: payment.validationMessage,
+            }
+          : {
+              status: PaymentStatus.VALIDATED,
+              code: null,
+              message: null,
+            };
       }
-      if (current.status !== PaymentStatus.RECEIVED || !payment.merchant) {
+      if (!payment.merchant) {
         throw new OutboxProcessingError(
           'Payment is not eligible for validation',
         );
@@ -332,27 +392,70 @@ export class PaymentLifecycleRepository {
             )
           : { status: PaymentStatus.VALIDATED, code: null, message: null };
 
-      if (result.status === PaymentStatus.VALIDATED && payment.direction === PaymentDirection.CREDIT) {
-        const account = await transaction.fundingAccount.findUnique({ where: { merchantId_currency: { merchantId: payment.merchantId, currency: payment.currency } } });
-        this.developmentLog('funding_account.loaded', payment.id, { found: Boolean(account) });
+      if (
+        result.status === PaymentStatus.VALIDATED &&
+        payment.direction === PaymentDirection.CREDIT
+      ) {
+        const account = await transaction.fundingAccount.findUnique({
+          where: {
+            merchantId_currency: {
+              merchantId: payment.merchantId,
+              currency: payment.currency,
+            },
+          },
+        });
+        this.developmentLog('funding_account.loaded', payment.id, {
+          found: Boolean(account),
+        });
         if (!account || account.status !== FundingAccountStatus.ACTIVE) {
           result = this.failed(
             'FUNDING_ACCOUNT_UNAVAILABLE',
             `No active ${payment.currency} funding account exists for merchant`,
           );
         } else {
-          await transaction.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${account.id}, 0))`);
+          await transaction.$executeRaw(
+            Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${account.id}, 0))`,
+          );
           this.developmentLog('funding_lock.acquired', payment.id);
-          const entries = await transaction.$queryRaw<{ total: bigint | null }[]>(Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${account.id}`);
-          const reserved = await transaction.reservation.aggregate({ where: { fundingAccountId: account.id, status: 'ACTIVE' }, _sum: { amount: true } });
+          const entries = await transaction.$queryRaw<
+            { total: bigint | null }[]
+          >(
+            Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${account.id}`,
+          );
+          const reserved = await transaction.reservation.aggregate({
+            where: { fundingAccountId: account.id, status: 'ACTIVE' },
+            _sum: { amount: true },
+          });
           const postedBalance = BigInt(entries[0]?.total ?? 0);
           const available = postedBalance - (reserved._sum.amount ?? BigInt(0));
-          this.developmentLog('funding.balance.calculated', payment.id, { postedBalance: postedBalance.toString(), activeReservations: (reserved._sum.amount ?? BigInt(0)).toString(), available: available.toString() });
-          if (available < payment.amountCents) result = this.failed('INSUFFICIENT_FUNDS', `Available ${available}, requested ${payment.amountCents}, currency ${payment.currency}`);
+          this.developmentLog('funding.balance.calculated', payment.id, {
+            postedBalance: postedBalance.toString(),
+            activeReservations: (reserved._sum.amount ?? BigInt(0)).toString(),
+            available: available.toString(),
+          });
+          if (available < payment.amountCents)
+            result = this.failed(
+              'INSUFFICIENT_FUNDS',
+              `Available ${available}, requested ${payment.amountCents}, currency ${payment.currency}`,
+            );
           else {
-            await transaction.reservation.create({ data: { paymentId: payment.id, fundingAccountId: account.id, amount: payment.amountCents } });
+            await transaction.reservation.create({
+              data: {
+                paymentId: payment.id,
+                fundingAccountId: account.id,
+                amount: payment.amountCents,
+              },
+            });
             this.developmentLog('reservation.inserted', payment.id);
-            await transaction.ledgerEntry.create({ data: { entryKey: `reservation:${payment.id}`, fundingAccountId: account.id, paymentId: payment.id, entryType: LedgerEntryType.RESERVATION, amount: payment.amountCents } });
+            await transaction.ledgerEntry.create({
+              data: {
+                entryKey: `reservation:${payment.id}`,
+                fundingAccountId: account.id,
+                paymentId: payment.id,
+                entryType: LedgerEntryType.RESERVATION,
+                amount: payment.amountCents,
+              },
+            });
             this.developmentLog('ledger_entry.inserted', payment.id);
           }
         }
@@ -383,14 +486,50 @@ export class PaymentLifecycleRepository {
         where: { id: payment.id, status: PaymentStatus.RECEIVED },
         data: this.transitionData(result),
       });
+      const transitionedPayment = await transaction.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+      await transaction.outboxEvent.create({
+        data: paymentLifecycleOutboxEvent(
+          transitionedPayment,
+          result.status === PaymentStatus.VALIDATED
+            ? OutboxEventType.PAYMENT_VALIDATED
+            : OutboxEventType.PAYMENT_VALIDATION_FAILED,
+          transitionedPayment.updatedAt,
+        ),
+      });
+      if (
+        result.status === PaymentStatus.VALIDATED &&
+        payment.direction === PaymentDirection.CREDIT
+      ) {
+        await transaction.outboxEvent.create({
+          data: paymentLifecycleOutboxEvent(
+            transitionedPayment,
+            OutboxEventType.PAYMENT_RESERVED,
+            transitionedPayment.updatedAt,
+          ),
+        });
+      }
       await this.completeOutbox(transaction, outboxEventId);
       this.developmentLog('outbox.completed', payment.id);
       return result;
     });
   }
 
-  private developmentLog(checkpoint: string, paymentId: string, details: Record<string, unknown> = {}): void {
-    if (process.env.NODE_ENV !== 'production') this.logger.debug(JSON.stringify({ event: 'ledger.reservation', checkpoint, paymentId, ...details }));
+  private developmentLog(
+    checkpoint: string,
+    paymentId: string,
+    details: Record<string, unknown> = {},
+  ): void {
+    if (process.env.NODE_ENV !== 'production')
+      this.logger.debug(
+        JSON.stringify({
+          event: 'ledger.reservation',
+          checkpoint,
+          paymentId,
+          ...details,
+        }),
+      );
   }
 
   // Deliberate no-op seam used only by rollback integration tests. It runs

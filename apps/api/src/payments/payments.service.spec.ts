@@ -11,7 +11,11 @@ import { PaymentsService } from './payments.service';
 import { PaymentEngineService } from './payment-engine.service';
 import { MerchantsRepository } from './merchants.repository';
 
-const merchant = { id: 'merchant-1', merchantCode: 'TEST_BOTH' };
+const merchant = {
+  id: 'merchant-1',
+  merchantCode: 'TEST_BOTH',
+  displayName: 'Test Both',
+};
 
 describe('buildPaymentRequestFingerprint', () => {
   const baseDto: CreatePaymentDto = {
@@ -75,8 +79,9 @@ describe('buildPaymentRequestFingerprint', () => {
 describe('PaymentsService', () => {
   let service: PaymentsService;
   let repository: {
-    createWithOutbox: jest.Mock;
-    findByIdempotencyKey: jest.Mock;
+    createWithOutboxAndIdempotency: jest.Mock;
+    findIdempotencyRecord: jest.Mock;
+    findIdempotencyRecordByPaymentId: jest.Mock;
     findById: jest.Mock;
     isUniqueConstraintViolation: jest.Mock;
   };
@@ -104,6 +109,7 @@ describe('PaymentsService', () => {
     status: 'RECEIVED' as const,
     amountCents: BigInt(2500),
     currency: 'USD',
+    merchantId: merchant.id,
     receiverName: dto.receiverName,
     receiverAccountRef: dto.receiverAccountRef,
     routingNumber: dto.routingNumber,
@@ -117,8 +123,9 @@ describe('PaymentsService', () => {
 
   beforeEach(async () => {
     repository = {
-      createWithOutbox: jest.fn(),
-      findByIdempotencyKey: jest.fn(),
+      createWithOutboxAndIdempotency: jest.fn(),
+      findIdempotencyRecord: jest.fn(),
+      findIdempotencyRecordByPaymentId: jest.fn().mockResolvedValue(null),
       findById: jest.fn(),
       isUniqueConstraintViolation: jest.fn(
         (error: unknown) =>
@@ -153,17 +160,22 @@ describe('PaymentsService', () => {
   });
 
   it('creates a payment on the first request', async () => {
-    repository.createWithOutbox.mockResolvedValue(paymentRecord);
+    repository.createWithOutboxAndIdempotency.mockResolvedValue(paymentRecord);
 
-    const result = await service.create(dto);
+    const result = await service.create(dto, dto.idempotencyKey, merchant);
 
-    expect(repository.createWithOutbox).toHaveBeenCalledWith(
+    expect(repository.createWithOutboxAndIdempotency).toHaveBeenCalledWith(
       expect.objectContaining({
-        idempotencyKey: dto.idempotencyKey,
+        idempotencyKey: `${merchant.id}:${dto.idempotencyKey}`,
         requestFingerprint: fingerprint,
         merchantId: merchant.id,
         amountCents: BigInt(2500),
       }),
+      {
+        merchantId: merchant.id,
+        idempotencyKey: dto.idempotencyKey,
+        requestFingerprint: fingerprint,
+      },
     );
     expect(result.created).toBe(true);
     expect(result.payment.id).toBe('pay-1');
@@ -172,17 +184,23 @@ describe('PaymentsService', () => {
   });
 
   it('returns the original payment for a repeated identical request', async () => {
-    repository.createWithOutbox.mockRejectedValue(
+    repository.createWithOutboxAndIdempotency.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
       }),
     );
-    repository.findByIdempotencyKey.mockResolvedValue(paymentRecord);
+    repository.findIdempotencyRecord.mockResolvedValue({
+      merchantId: merchant.id,
+      idempotencyKey: dto.idempotencyKey,
+      requestFingerprint: fingerprint,
+      payment: paymentRecord,
+    });
 
-    const result = await service.create(dto);
+    const result = await service.create(dto, dto.idempotencyKey, merchant);
 
-    expect(repository.findByIdempotencyKey).toHaveBeenCalledWith(
+    expect(repository.findIdempotencyRecord).toHaveBeenCalledWith(
+      merchant.id,
       dto.idempotencyKey,
     );
     expect(result.created).toBe(false);
@@ -191,19 +209,24 @@ describe('PaymentsService', () => {
   });
 
   it('returns the original payment when it becomes visible after retries', async () => {
-    repository.createWithOutbox.mockRejectedValue(
+    repository.createWithOutboxAndIdempotency.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
       }),
     );
-    repository.findByIdempotencyKey
+    repository.findIdempotencyRecord
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(paymentRecord);
+      .mockResolvedValueOnce({
+        merchantId: merchant.id,
+        idempotencyKey: dto.idempotencyKey,
+        requestFingerprint: fingerprint,
+        payment: paymentRecord,
+      });
 
-    const result = await service.create(dto);
+    const result = await service.create(dto, dto.idempotencyKey, merchant);
 
-    expect(repository.findByIdempotencyKey).toHaveBeenCalledTimes(2);
+    expect(repository.findIdempotencyRecord).toHaveBeenCalledTimes(2);
     expect(result.created).toBe(false);
     expect(result.payment.id).toBe('pay-1');
     expect(result.payment).not.toHaveProperty('requestFingerprint');
@@ -212,7 +235,7 @@ describe('PaymentsService', () => {
   it('does not expose the request fingerprint when retrieving a payment', async () => {
     repository.findById.mockResolvedValue(paymentRecord);
 
-    const payment = await service.findOne('pay-1');
+    const payment = await service.findOne('pay-1', merchant);
 
     expect(payment.id).toBe('pay-1');
     expect(payment.amountCents).toBe('2500');
@@ -220,40 +243,48 @@ describe('PaymentsService', () => {
   });
 
   it('returns 409 when the same key is reused with a different payload', async () => {
-    repository.createWithOutbox.mockRejectedValue(
+    repository.createWithOutboxAndIdempotency.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
       }),
     );
-    repository.findByIdempotencyKey.mockResolvedValue({
-      ...paymentRecord,
+    repository.findIdempotencyRecord.mockResolvedValue({
+      merchantId: merchant.id,
+      idempotencyKey: dto.idempotencyKey,
       requestFingerprint: 'different-fingerprint',
+      payment: paymentRecord,
     });
 
     await expect(
-      service.create({
-        ...dto,
-        amountCents: 9999,
-      }),
+      service.create(
+        {
+          ...dto,
+          amountCents: 9999,
+        },
+        dto.idempotencyKey,
+        merchant,
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('returns an internal error when a payment never becomes visible after P2002', async () => {
-    repository.createWithOutbox.mockRejectedValue(
+    repository.createWithOutboxAndIdempotency.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
       }),
     );
-    repository.findByIdempotencyKey.mockResolvedValue(null);
+    repository.findIdempotencyRecord.mockResolvedValue(null);
 
-    await expect(service.create(dto)).rejects.toMatchObject({
+    await expect(
+      service.create(dto, dto.idempotencyKey, merchant),
+    ).rejects.toMatchObject({
       status: 500,
       message:
         'Payment could not be read after a concurrent idempotency conflict.',
     } satisfies Partial<InternalServerErrorException>);
 
-    expect(repository.findByIdempotencyKey).toHaveBeenCalledTimes(4);
+    expect(repository.findIdempotencyRecord).toHaveBeenCalledTimes(4);
   });
 });

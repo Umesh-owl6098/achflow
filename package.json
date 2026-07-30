@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "echo \"Run app-specific dev commands\"",
+    "web:dev": "pnpm --filter web dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",

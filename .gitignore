@@ -35,6 +35,11 @@ apps/*/dist/
 apps/web/.vite/
 apps/web/dist/
 
+# Next.js and TypeScript
+apps/web/.next/
+apps/web/test-results/
+*.tsbuildinfo
+
 # Prisma
 *.db
 *.db-journal

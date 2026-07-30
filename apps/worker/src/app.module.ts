@@ -6,6 +6,9 @@ import { PaymentLifecycleRepository } from './payments/payment-lifecycle.reposit
 import { PaymentValidationService } from './payments/payment-validation.service';
 import { WorkerConfigService } from './worker-config.service';
 import { WorkerPrismaService } from './worker-prisma.service';
+import { WebhookDeliveryMaterializerService } from './webhooks/webhook-delivery-materializer.service';
+import { WebhookDeliveryProcessorService } from './webhooks/webhook-delivery-processor.service';
+import { NachaFileGeneratorService } from './ach/nacha-file-generator.service';
 
 @Module({
   providers: [
@@ -16,6 +19,9 @@ import { WorkerPrismaService } from './worker-prisma.service';
     PaymentValidationService,
     OutboxHandler,
     OutboxPollingService,
+    WebhookDeliveryMaterializerService,
+    WebhookDeliveryProcessorService,
+    NachaFileGeneratorService,
   ],
 })
 export class AppModule {}

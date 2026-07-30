@@ -6,6 +6,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { paymentLifecycleOutboxEvent } from '../../prisma/payment-lifecycle-event.factory';
 
 export type CreatePaymentRecord = {
   idempotencyKey: string;
@@ -25,13 +26,10 @@ export type PaymentWithMerchant = Payment & {
   merchant: { merchantCode: string; displayName: string };
 };
 
-export type PaymentReceivedOutboxPayload = {
-  paymentId: string;
-  externalReference: string | null;
-  direction: PaymentDirection;
-  amountCents: string;
-  currency: string;
-  createdAt: string;
+export type CreatePaymentIdempotencyRecord = {
+  merchantId: string;
+  idempotencyKey: string;
+  requestFingerprint: string;
 };
 
 @Injectable()
@@ -48,15 +46,58 @@ export class PaymentsRepository {
       });
 
       await transaction.outboxEvent.create({
-        data: {
-          eventType: OutboxEventType.PAYMENT_RECEIVED,
-          aggregateType: 'PAYMENT',
-          aggregateId: payment.id,
-          payload: this.buildPaymentReceivedPayload(payment),
-        },
+        data: paymentLifecycleOutboxEvent(
+          payment,
+          OutboxEventType.PAYMENT_RECEIVED,
+          payment.createdAt,
+        ),
       });
 
       return payment;
+    });
+  }
+
+  createWithOutboxAndIdempotency(
+    data: CreatePaymentRecord,
+    idempotency: CreatePaymentIdempotencyRecord,
+  ): Promise<PaymentWithMerchant> {
+    return this.prisma.$transaction(async (transaction) => {
+      const payment = await transaction.payment.create({
+        data,
+        include: {
+          merchant: { select: { merchantCode: true, displayName: true } },
+        },
+      });
+      await transaction.outboxEvent.create({
+        data: paymentLifecycleOutboxEvent(
+          payment,
+          OutboxEventType.PAYMENT_RECEIVED,
+          payment.createdAt,
+        ),
+      });
+      await transaction.paymentIdempotencyRecord.create({
+        data: { ...idempotency, paymentId: payment.id },
+      });
+      return payment;
+    });
+  }
+
+  findIdempotencyRecord(merchantId: string, idempotencyKey: string) {
+    return this.prisma.paymentIdempotencyRecord.findUnique({
+      where: { merchantId_idempotencyKey: { merchantId, idempotencyKey } },
+      include: {
+        payment: {
+          include: {
+            merchant: { select: { merchantCode: true, displayName: true } },
+          },
+        },
+      },
+    });
+  }
+
+  findIdempotencyRecordByPaymentId(paymentId: string) {
+    return this.prisma.paymentIdempotencyRecord.findUnique({
+      where: { paymentId },
     });
   }
 
@@ -80,6 +121,34 @@ export class PaymentsRepository {
     });
   }
 
+  listForMerchant({
+    merchantId,
+    where,
+    orderBy,
+    skip,
+    take,
+  }: {
+    merchantId: string;
+    where: Prisma.PaymentWhereInput;
+    orderBy: Prisma.PaymentOrderByWithRelationInput;
+    skip: number;
+    take: number;
+  }) {
+    const scopedWhere: Prisma.PaymentWhereInput = { merchantId, ...where };
+    return this.prisma.$transaction([
+      this.prisma.payment.findMany({
+        where: scopedWhere,
+        include: {
+          merchant: { select: { merchantCode: true, displayName: true } },
+        },
+        orderBy,
+        skip,
+        take,
+      }),
+      this.prisma.payment.count({ where: scopedWhere }),
+    ]);
+  }
+
   isUniqueConstraintViolation(
     error: unknown,
   ): error is Prisma.PrismaClientKnownRequestError {
@@ -87,18 +156,5 @@ export class PaymentsRepository {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === 'P2002'
     );
-  }
-
-  private buildPaymentReceivedPayload(
-    payment: Payment,
-  ): PaymentReceivedOutboxPayload {
-    return {
-      paymentId: payment.id,
-      externalReference: payment.externalReference,
-      direction: payment.direction,
-      amountCents: payment.amountCents.toString(),
-      currency: payment.currency,
-      createdAt: payment.createdAt.toISOString(),
-    };
   }
 }

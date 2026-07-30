@@ -12,10 +12,10 @@ import {
 import { PaymentDirection } from '@prisma/client';
 
 export class CreatePaymentDto {
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @MaxLength(100)
-  idempotencyKey!: string;
+  idempotencyKey?: string;
 
   @IsOptional()
   @IsString()

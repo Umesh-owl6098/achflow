@@ -1,0 +1,18 @@
+PASSED 01-dashboard.png
+PASSED 02-payments-list.png
+PASSED 06-ledger.png
+PASSED 07-nacha-files.png
+PASSED 09-webhook-endpoints.png
+PASSED 11-merchants-list.png
+PASSED 13-settings-system-health.png
+PASSED 14-simulator-configuration.png
+PASSED 08-nacha-file-details.png
+PASSED 10-webhook-delivery-events.png
+PASSED 12-merchant-details.png
+PASSED 16-simulator-completed.png
+PASSED 17-simulator-run-history.png
+SKIPPED 15-simulator-running.png: no new run was started solely to stage a transient screenshot; an existing real completed 10-payment run was used.
+PASSED 03-payment-details-overview.png
+PASSED 04-payment-details-ledger.png
+PASSED 05-payment-details-events.png
+PASSED 18-mobile-dashboard.png
