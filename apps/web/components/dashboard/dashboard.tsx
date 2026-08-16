@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React from "react";
+import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import {
@@ -26,13 +26,43 @@ import {
   statusTone,
 } from "@/lib/dashboard";
 
-async function loadDashboard(): Promise<DashboardData> {
-  const response = await fetch("/api/dashboard", {
+async function loadDashboard(merchantId: string): Promise<DashboardData> {
+  const query = merchantId
+    ? `?merchantId=${encodeURIComponent(merchantId)}`
+    : "";
+  const response = await fetch(`/api/dashboard${query}`, {
     headers: { Accept: "application/json" },
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error("Dashboard data is unavailable.");
   return parseDashboardData(body);
+}
+
+type MerchantOption = { id: string; displayName: string; merchantCode: string };
+async function loadMerchants(): Promise<MerchantOption[]> {
+  const response = await fetch("/api/admin/merchants", {
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    !body ||
+    typeof body !== "object" ||
+    !("data" in body) ||
+    !Array.isArray(body.data)
+  )
+    throw new Error("Merchant data is unavailable.");
+  return body.data.filter(
+    (value): value is MerchantOption =>
+      typeof value === "object" &&
+      value !== null &&
+      "id" in value &&
+      "displayName" in value &&
+      "merchantCode" in value &&
+      typeof value.id === "string" &&
+      typeof value.displayName === "string" &&
+      typeof value.merchantCode === "string",
+  );
 }
 
 const summaryCards = [
@@ -61,7 +91,15 @@ const summaryCards = [
 ] as const;
 
 export function Dashboard() {
-  const query = useQuery({ queryKey: ["dashboard"], queryFn: loadDashboard });
+  const [merchantId, setMerchantId] = useState("");
+  const query = useQuery({
+    queryKey: ["dashboard", merchantId],
+    queryFn: () => loadDashboard(merchantId),
+  });
+  const merchantsQuery = useQuery({
+    queryKey: ["admin-merchants"],
+    queryFn: loadMerchants,
+  });
   if (query.isLoading) return <DashboardSkeleton />;
   if (query.isError)
     return (
@@ -99,6 +137,22 @@ export function Dashboard() {
             Merchant activity and ACH lifecycle visibility.
           </p>
         </div>
+        <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
+          Merchant scope
+          <select
+            aria-label="Merchant scope"
+            value={merchantId}
+            onChange={(event) => setMerchantId(event.target.value)}
+            className="mt-1 block h-9 min-w-48 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100"
+          >
+            <option value="">All merchants</option>
+            {(merchantsQuery.data ?? []).map((merchant) => (
+              <option key={merchant.id} value={merchant.id}>
+                {merchant.displayName} ({merchant.merchantCode})
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
           <span>
             Updated{" "}

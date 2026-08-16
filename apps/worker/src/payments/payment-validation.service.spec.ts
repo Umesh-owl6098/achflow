@@ -57,11 +57,11 @@ describe('PaymentValidationService', () => {
     async (direction) => {
       const { service, repository } = createService({ ...payment, direction });
 
-      await service.validate(payment.id);
+      await service.validate(payment.id, 'event-1');
 
       expect(repository.reserveDailyUsageAndTransition).toHaveBeenCalledWith(
         expect.objectContaining({ id: payment.id, direction }),
-        undefined,
+        'event-1',
       );
     },
   );
@@ -74,7 +74,7 @@ describe('PaymentValidationService', () => {
         amountCents,
       });
 
-      await service.validate(payment.id);
+      await service.validate(payment.id, 'event-1');
 
       expect(repository.transitionFromReceived).toHaveBeenCalledWith(
         payment.id,
@@ -93,7 +93,7 @@ describe('PaymentValidationService', () => {
       currency: 'CAD',
     });
 
-    await service.validate(payment.id);
+    await service.validate(payment.id, 'event-1');
 
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(payment.id, {
       status: PaymentStatus.VALIDATION_FAILED,
@@ -109,7 +109,7 @@ describe('PaymentValidationService', () => {
     });
     const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
 
-    await service.validate(payment.id);
+    await service.validate(payment.id, 'event-1');
 
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(payment.id, {
       status: PaymentStatus.VALIDATION_FAILED,
@@ -129,7 +129,7 @@ describe('PaymentValidationService', () => {
       new Error('database unavailable'),
     );
 
-    await expect(service.validate(payment.id)).rejects.toThrow(
+    await expect(service.validate(payment.id, 'event-1')).rejects.toThrow(
       'database unavailable',
     );
   });
@@ -139,7 +139,7 @@ describe('PaymentValidationService', () => {
       ...payment,
       merchant: { ...payment.merchant!, status: MerchantStatus.SUSPENDED },
     });
-    await service.validate(payment.id);
+    await service.validate(payment.id, 'event-1');
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(payment.id, {
       status: PaymentStatus.VALIDATION_FAILED,
       code: 'MERCHANT_NOT_ACTIVE',
@@ -156,7 +156,7 @@ describe('PaymentValidationService', () => {
       direction,
       merchant: { ...payment.merchant!, [permission]: false },
     });
-    await service.validate(payment.id);
+    await service.validate(payment.id, 'event-1');
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(
       payment.id,
       expect.objectContaining({
@@ -171,7 +171,7 @@ describe('PaymentValidationService', () => {
       ...payment,
       amountCents: BigInt(10001),
     });
-    await service.validate(payment.id);
+    await service.validate(payment.id, 'event-1');
     expect(repository.transitionFromReceived).toHaveBeenCalledWith(
       payment.id,
       expect.objectContaining({ code: 'PER_PAYMENT_LIMIT_EXCEEDED' }),

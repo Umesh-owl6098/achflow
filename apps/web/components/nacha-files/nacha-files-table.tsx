@@ -29,6 +29,7 @@ import {
 } from "@/lib/nacha-files";
 
 const initialFilters: NachaFilesFilters = {
+  merchantId: "",
   search: "",
   status: "",
   dateRange: "all",
@@ -46,6 +47,33 @@ async function loadNachaFiles(
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error("NACHA file data is unavailable.");
   return parseNachaFilesData(body);
+}
+
+type MerchantOption = { id: string; displayName: string; merchantCode: string };
+async function loadMerchants(): Promise<MerchantOption[]> {
+  const response = await fetch("/api/admin/merchants", {
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    !body ||
+    typeof body !== "object" ||
+    !("data" in body) ||
+    !Array.isArray(body.data)
+  )
+    throw new Error("Merchant data is unavailable.");
+  return body.data.filter(
+    (value): value is MerchantOption =>
+      typeof value === "object" &&
+      value !== null &&
+      "id" in value &&
+      "displayName" in value &&
+      "merchantCode" in value &&
+      typeof value.id === "string" &&
+      typeof value.displayName === "string" &&
+      typeof value.merchantCode === "string",
+  );
 }
 
 function useDebouncedValue(value: string, delay = 300) {
@@ -69,6 +97,10 @@ export function NachaFilesTable() {
     queryKey: ["nacha-files", queryFilters],
     queryFn: () => loadNachaFiles(queryFilters),
   });
+  const merchantsQuery = useQuery({
+    queryKey: ["admin-merchants"],
+    queryFn: loadMerchants,
+  });
   const updateFilters = (update: Partial<NachaFilesFilters>) =>
     setFilters((current) => ({ ...current, ...update }));
 
@@ -88,7 +120,7 @@ export function NachaFilesTable() {
     <div className="space-y-5">
       <PageHeader
         title="NACHA Files"
-        description="Outbound ACH batches generated for the authenticated merchant."
+        description="Outbound ACH batches generated for the selected operations scope."
       />
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Summary
@@ -118,6 +150,24 @@ export function NachaFilesTable() {
             placeholder="Search file ID or file name"
             className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-800 dark:bg-slate-900"
           />
+        </label>
+        <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
+          Merchant
+          <select
+            aria-label="Merchant filter"
+            value={filters.merchantId}
+            onChange={(event) =>
+              updateFilters({ merchantId: event.target.value })
+            }
+            className="mt-1 block h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm dark:border-slate-800 dark:bg-slate-900"
+          >
+            <option value="">All merchants</option>
+            {(merchantsQuery.data ?? []).map((merchant) => (
+              <option key={merchant.id} value={merchant.id}>
+                {merchant.displayName} ({merchant.merchantCode})
+              </option>
+            ))}
+          </select>
         </label>
         <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
           Submission status

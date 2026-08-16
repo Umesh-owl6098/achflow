@@ -74,6 +74,10 @@ type LedgerResponse = {
   }>;
 };
 
+type AdminDashboardResponse = {
+  summary: { paymentsToday: number };
+};
+
 describe('Payments idempotency (integration)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
@@ -84,6 +88,7 @@ describe('Payments idempotency (integration)', () => {
 
   const testBothApiKey = 'merchant-api-key-test-both';
   const testCreditApiKey = 'merchant-api-key-test-credit';
+  const adminApiKey = 'achflow-api-test-admin-key';
   const bearer = (apiKey: string) => `Bearer ${apiKey}`;
 
   const paymentPayload: CreatePaymentDto = {
@@ -122,42 +127,44 @@ describe('Payments idempotency (integration)', () => {
   });
 
   beforeEach(async () => {
-    await prisma.webhookDelivery.deleteMany();
-    await prisma.outboxEvent.deleteMany();
-    await prisma.reservation.deleteMany();
-    await prisma.ledgerEntry.deleteMany();
-    await prisma.processedBankEvent.deleteMany();
-    await prisma.merchantDailyUsage.deleteMany();
-    await prisma.paymentIdempotencyRecord.deleteMany();
-    await prisma.payment.deleteMany();
-    await prisma.achFile.deleteMany();
-    await prisma.fundingAccount.deleteMany();
-    await prisma.merchantApiKey.deleteMany();
-    await prisma.merchantWebhookEndpoint.deleteMany();
-    await prisma.merchant.deleteMany();
-    await prisma.merchant.createMany({
-      data: [
-        {
-          merchantCode: 'TEST_BOTH',
-          legalName: 'Test Both LLC',
-          displayName: 'Test Both',
-          status: MerchantStatus.ACTIVE,
-          allowAchDebit: true,
-          allowAchCredit: true,
-          perPaymentLimit: BigInt(1000000),
-          dailyAmountLimit: BigInt(5000000),
-        },
-        {
-          merchantCode: 'TEST_CREDIT',
-          legalName: 'Test Credit LLC',
-          displayName: 'Test Credit',
-          status: MerchantStatus.ACTIVE,
-          allowAchDebit: false,
-          allowAchCredit: true,
-          perPaymentLimit: BigInt(1000000),
-          dailyAmountLimit: BigInt(5000000),
-        },
-      ],
+    await prisma.$transaction(async (transaction) => {
+      await transaction.webhookDelivery.deleteMany();
+      await transaction.outboxEvent.deleteMany();
+      await transaction.reservation.deleteMany();
+      await transaction.ledgerEntry.deleteMany();
+      await transaction.processedBankEvent.deleteMany();
+      await transaction.merchantDailyUsage.deleteMany();
+      await transaction.paymentIdempotencyRecord.deleteMany();
+      await transaction.payment.deleteMany();
+      await transaction.achFile.deleteMany();
+      await transaction.fundingAccount.deleteMany();
+      await transaction.merchantApiKey.deleteMany();
+      await transaction.merchantWebhookEndpoint.deleteMany();
+      await transaction.merchant.deleteMany();
+      await transaction.merchant.createMany({
+        data: [
+          {
+            merchantCode: 'TEST_BOTH',
+            legalName: 'Test Both LLC',
+            displayName: 'Test Both',
+            status: MerchantStatus.ACTIVE,
+            allowAchDebit: true,
+            allowAchCredit: true,
+            perPaymentLimit: BigInt(1000000),
+            dailyAmountLimit: BigInt(5000000),
+          },
+          {
+            merchantCode: 'TEST_CREDIT',
+            legalName: 'Test Credit LLC',
+            displayName: 'Test Credit',
+            status: MerchantStatus.ACTIVE,
+            allowAchDebit: false,
+            allowAchCredit: true,
+            perPaymentLimit: BigInt(1000000),
+            dailyAmountLimit: BigInt(5000000),
+          },
+        ],
+      });
     });
     const merchants = await prisma.merchant.findMany({
       where: { merchantCode: { in: ['TEST_BOTH', 'TEST_CREDIT'] } },
@@ -189,9 +196,21 @@ describe('Payments idempotency (integration)', () => {
     const body = response.body as PaymentResponseDto;
 
     expect(body.id).toBeDefined();
+    expect(body.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(body.idempotencyKey).toBe(paymentPayload.idempotencyKey);
+    expect(body.amountCents).toMatch(/^\d+$/);
     expect(body.amountCents).toBe('5000');
+    expect(body.currency).toMatch(/^[A-Z]{3}$/);
     expect(body.status).toBe('RECEIVED');
+    expect(Object.values(PaymentStatus)).toContain(body.status);
+    expect(String(body.createdAt)).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    expect(String(body.updatedAt)).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
     expect(body.merchant).toEqual({
       merchantCode: 'TEST_BOTH',
       displayName: 'Test Both',
@@ -236,7 +255,7 @@ describe('Payments idempotency (integration)', () => {
   it('returns authenticated read-only dashboard data for the merchant', async () => {
     const response = await request(app.getHttpServer())
       .post('/api/v1/payments')
-      .set('Idempotency-Key', paymentPayload.idempotencyKey)
+      .set('Idempotency-Key', paymentPayload.idempotencyKey!)
       .set('Authorization', bearer(testBothApiKey))
       .send(paymentPayload)
       .expect(201);
@@ -257,6 +276,10 @@ describe('Payments idempotency (integration)', () => {
       },
     });
     expect(dashboardBody.dailyVolume).toHaveLength(7);
+    expect(dashboardBody.recentPayments[0].id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(dashboardBody.recentPayments[0].amountCents).toMatch(/^\d+$/);
     expect(dashboardBody.recentPayments).toEqual([
       expect.objectContaining({
         id: createdPayment.id,
@@ -264,6 +287,120 @@ describe('Payments idempotency (integration)', () => {
         amountCents: '5000',
       }),
     ]);
+  });
+
+  it('keeps merchant reads isolated while admin operations reads aggregate and filter merchants', async () => {
+    const [merchantOne, merchantTwo] = await prisma.merchant.findMany({
+      where: { merchantCode: { in: ['TEST_BOTH', 'TEST_CREDIT'] } },
+      orderBy: { merchantCode: 'asc' },
+    });
+    await prisma.payment.createMany({
+      data: [
+        {
+          id: 'admin-merchant-one-payment',
+          merchantId: merchantOne.id,
+          idempotencyKey: 'admin-merchant-one-key',
+          requestFingerprint: 'admin-merchant-one-fingerprint',
+          direction: PaymentDirection.DEBIT,
+          amountCents: BigInt(1200),
+          currency: 'USD',
+          receiverName: 'Merchant One Receiver',
+          receiverAccountRef: 'merchant-one-account',
+          routingNumber: '021000021',
+          status: PaymentStatus.VALIDATED,
+        },
+        {
+          id: 'admin-merchant-two-payment',
+          merchantId: merchantTwo.id,
+          idempotencyKey: 'admin-merchant-two-key',
+          requestFingerprint: 'admin-merchant-two-fingerprint',
+          direction: PaymentDirection.CREDIT,
+          amountCents: BigInt(3400),
+          currency: 'USD',
+          receiverName: 'Merchant Two Receiver',
+          receiverAccountRef: 'merchant-two-account',
+          routingNumber: '031000503',
+          status: PaymentStatus.VALIDATED,
+        },
+      ],
+    });
+    const fundingAccount = await prisma.fundingAccount.create({
+      data: { merchantId: merchantTwo.id, currency: 'USD' },
+    });
+    await prisma.ledgerEntry.create({
+      data: {
+        entryKey: 'admin-merchant-two-credit',
+        fundingAccountId: fundingAccount.id,
+        paymentId: 'admin-merchant-two-payment',
+        entryType: LedgerEntryType.CREDIT_POSTED,
+        amount: BigInt(3400),
+      },
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/payments/admin-merchant-two-payment')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(404);
+    const allDashboard = await request(app.getHttpServer())
+      .get('/api/v1/admin/dashboard')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    const allDashboardBody = allDashboard.body as AdminDashboardResponse;
+    expect(allDashboardBody.summary.paymentsToday).toBe(2);
+    const filteredDashboard = await request(app.getHttpServer())
+      .get('/api/v1/admin/dashboard')
+      .query({ merchantId: merchantTwo.id })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    const filteredDashboardBody =
+      filteredDashboard.body as AdminDashboardResponse;
+    expect(filteredDashboardBody.summary.paymentsToday).toBe(1);
+    const ledger = await request(app.getHttpServer())
+      .get('/api/v1/admin/ledger')
+      .query({ merchantId: merchantTwo.id })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    const ledgerBody = ledger.body as unknown as LedgerResponse;
+    expect(ledgerBody.data).toHaveLength(1);
+    expect(ledgerBody.data[0]?.payment?.id).toBe('admin-merchant-two-payment');
+  });
+
+  it('creates a simulator payment for an active non-default merchant', async () => {
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_CREDIT' },
+    });
+    const run = await request(app.getHttpServer())
+      .post('/api/v1/admin/simulator/runs')
+      .set('Authorization', bearer(adminApiKey))
+      .send({
+        merchantIds: [merchant.id],
+        direction: 'CREDIT',
+        transactionCount: 1,
+        transactionsPerSecond: 25,
+        minimumAmountCents: 100,
+        maximumAmountCents: 100,
+        secCode: 'PPD',
+        descriptionPrefix: 'Merchant B simulation',
+        scenario: {
+          successfulPercent: 100,
+          validationFailurePercent: 0,
+          returnPercent: 0,
+          insufficientFundsPercent: 0,
+          duplicatePercent: 0,
+          delayedProcessingPercent: 0,
+          webhookFailurePercent: 0,
+        },
+      })
+      .expect(201);
+    const runId = (run.body as { id: string }).id;
+    await waitForSimulatorPayment(prisma, runId);
+    await waitForSimulatorCompletion(prisma, runId);
+    const payment = await prisma.payment.findFirstOrThrow({
+      where: { externalReference: { startsWith: `sim:${runId}:` } },
+    });
+    expect(payment.merchantId).toBe(merchant.id);
+    expect(payment.direction).toBe(PaymentDirection.CREDIT);
+    expect(payment.status).toBe(PaymentStatus.RECEIVED);
   });
 
   it('lists authenticated merchant payments with server-side filters and pagination', async () => {
@@ -307,6 +444,11 @@ describe('Payments idempotency (integration)', () => {
         merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
       }),
     ]);
+    expect(listBody.data[0].id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(listBody.data[0].amountCents).toMatch(/^\d+$/);
+    expect(Object.values(PaymentStatus)).toContain(listBody.data[0].status);
   });
 
   it('returns merchant-scoped ledger entries, summaries, and read-only filters', async () => {
@@ -402,6 +544,9 @@ describe('Payments idempotency (integration)', () => {
       },
       reservation: { amountCents: '2000', status: 'ACTIVE' },
     });
+    expect(debitEntry?.entryKey).toMatch(/^ledger-test:[a-z-]+$/);
+    expect(debitEntry?.debitAmountCents).toMatch(/^\d+$/);
+    expect(debitEntry?.runningBalanceCents).toMatch(/^-?\d+$/);
 
     const filtered = await request(app.getHttpServer())
       .get('/api/v1/ledger')
@@ -496,6 +641,9 @@ describe('Payments idempotency (integration)', () => {
         creditCount: 1,
       }),
     ]);
+    expect(listedBody.data[0].id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
 
     const download = await request(app.getHttpServer())
       .get(`/api/v1/nacha-files/${achFile.id}/download`)
@@ -826,6 +974,43 @@ describe('Payments idempotency (integration)', () => {
     expect(await prisma.outboxEvent.count()).toBe(1);
   });
 
+  it('returns one identical financial result across 100 idempotent create evaluations', async () => {
+    const idempotencyKey = 'consistency-evaluation-key';
+    const payload: CreatePaymentDto = {
+      ...paymentPayload,
+      idempotencyKey,
+      externalReference: 'consistency-evaluation-reference',
+    };
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_BOTH' },
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 100 }, () =>
+        paymentsService.create(payload, idempotencyKey, merchant),
+      ),
+    );
+
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    expect(results.filter((result) => !result.created)).toHaveLength(99);
+    expect(new Set(results.map((result) => result.payment.id)).size).toBe(1);
+    expect(
+      results.every(
+        (result) =>
+          result.payment.id === results[0].payment.id &&
+          result.payment.createdAt.getTime() ===
+            results[0].payment.createdAt.getTime() &&
+          result.payment.status === 'RECEIVED' &&
+          result.payment.amountCents === '5000',
+      ),
+    ).toBe(true);
+    expect(await prisma.payment.count()).toBe(1);
+    expect(await prisma.paymentIdempotencyRecord.count()).toBe(1);
+    expect(await prisma.outboxEvent.count()).toBe(1);
+    expect(await prisma.reservation.count()).toBe(0);
+    expect(await prisma.ledgerEntry.count()).toBe(0);
+  });
+
   it('exposes the payment lifecycle through REST endpoints', async () => {
     const merchant = await prisma.merchant.findUniqueOrThrow({
       where: { merchantCode: 'TEST_BOTH' },
@@ -955,3 +1140,33 @@ describe('Payments idempotency (integration)', () => {
     );
   });
 });
+
+async function waitForSimulatorPayment(
+  prisma: PrismaService,
+  runId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const payment = await prisma.payment.findFirst({
+      where: { externalReference: { startsWith: `sim:${runId}:` } },
+      select: { id: true },
+    });
+    if (payment) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Simulator payment was not created in time.');
+}
+
+async function waitForSimulatorCompletion(
+  prisma: PrismaService,
+  runId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const run = await prisma.simulatorRun.findUnique({
+      where: { id: runId },
+      select: { status: true },
+    });
+    if (run?.status === 'COMPLETED') return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Simulator run did not complete in time.');
+}

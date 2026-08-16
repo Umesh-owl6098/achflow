@@ -75,46 +75,48 @@ describe('Outbox worker (integration)', () => {
   });
 
   beforeEach(async () => {
-    await prismaOne.webhookDelivery.deleteMany();
-    await prismaOne.outboxEvent.deleteMany();
-    await prismaOne.processedBankEvent.deleteMany();
-    await prismaOne.reservation.deleteMany();
-    await prismaOne.ledgerEntry.deleteMany();
-    await prismaOne.merchantDailyUsage.deleteMany();
-    await prismaOne.paymentIdempotencyRecord.deleteMany();
-    await prismaOne.payment.deleteMany();
-    await prismaOne.achFile.deleteMany();
-    await prismaOne.fundingAccount.deleteMany();
-    await prismaOne.merchantApiKey.deleteMany();
-    await prismaOne.merchantWebhookEndpoint.deleteMany();
-    await prismaOne.merchant.deleteMany();
-    await prismaOne.merchant.create({
-      data: {
-        id: 'merchant-1',
-        merchantCode: 'WORKER_TEST',
-        legalName: 'Worker Test LLC',
-        displayName: 'Worker Test',
-        status: MerchantStatus.ACTIVE,
-        allowAchDebit: true,
-        allowAchCredit: true,
-        perPaymentLimit: BigInt(10000),
-        dailyAmountLimit: BigInt(100000),
-      },
-    });
-    const fundingAccount = await prismaOne.fundingAccount.create({
-      data: {
-        id: 'funding-account-1',
-        merchantId: 'merchant-1',
-        currency: 'USD',
-      },
-    });
-    await prismaOne.ledgerEntry.create({
-      data: {
-        entryKey: 'initial-credit:merchant-1',
-        fundingAccountId: fundingAccount.id,
-        entryType: 'INITIAL_CREDIT',
-        amount: BigInt(100_000),
-      },
+    await prismaOne.$transaction(async (transaction) => {
+      await transaction.webhookDelivery.deleteMany();
+      await transaction.outboxEvent.deleteMany();
+      await transaction.processedBankEvent.deleteMany();
+      await transaction.reservation.deleteMany();
+      await transaction.ledgerEntry.deleteMany();
+      await transaction.merchantDailyUsage.deleteMany();
+      await transaction.paymentIdempotencyRecord.deleteMany();
+      await transaction.payment.deleteMany();
+      await transaction.achFile.deleteMany();
+      await transaction.fundingAccount.deleteMany();
+      await transaction.merchantApiKey.deleteMany();
+      await transaction.merchantWebhookEndpoint.deleteMany();
+      await transaction.merchant.deleteMany();
+      await transaction.merchant.create({
+        data: {
+          id: 'merchant-1',
+          merchantCode: 'WORKER_TEST',
+          legalName: 'Worker Test LLC',
+          displayName: 'Worker Test',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: BigInt(10000),
+          dailyAmountLimit: BigInt(100000),
+        },
+      });
+      const fundingAccount = await transaction.fundingAccount.create({
+        data: {
+          id: 'funding-account-1',
+          merchantId: 'merchant-1',
+          currency: 'USD',
+        },
+      });
+      await transaction.ledgerEntry.create({
+        data: {
+          entryKey: 'initial-credit:merchant-1',
+          fundingAccountId: fundingAccount.id,
+          entryType: 'INITIAL_CREDIT',
+          amount: BigInt(100_000),
+        },
+      });
     });
   });
 
@@ -6935,9 +6937,21 @@ describe('Outbox worker (integration)', () => {
         const timestamp = request.headers['x-achflow-timestamp'] as string;
         const signature = request.headers['x-achflow-signature'] as string;
         expect(request.headers['x-achflow-event-id']).toBe(delivery.eventId);
+        expect(signature).toMatch(/^v1=[0-9a-f]{64}$/);
         expect(signature).toBe(
           `v1=${createHmac('sha256', secret).update(`${timestamp}.${request.body}`).digest('hex')}`,
         );
+        const modifiedBody = request.body.replace('"4000"', '"4001"');
+        expect(
+          `v1=${createHmac('sha256', secret)
+            .update(`${timestamp}.${modifiedBody}`)
+            .digest('hex')}`,
+        ).not.toBe(signature);
+        expect(
+          `v1=${createHmac('sha256', 'wrong-webhook-secret')
+            .update(`${timestamp}.${request.body}`)
+            .digest('hex')}`,
+        ).not.toBe(signature);
         expect(request.headers['content-type']).toContain('application/json');
         const payload = JSON.parse(request.body) as {
           data: { amountCents: string };
@@ -7000,10 +7014,57 @@ describe('Outbox worker (integration)', () => {
     ).toBe(true);
     expect(records.every((record) => record.length === 94)).toBe(true);
     expect(records.length % 10).toBe(0);
-    expect(records[0][0]).toBe('1');
-    expect(records.filter((record) => record[0] === '6')).toHaveLength(3);
-    expect(records.some((record) => record[0] === '5')).toBe(true);
-    expect(records.filter((record) => record[0] === '8')).toHaveLength(2);
+    expect(records[0]).toMatch(/^1.{93}$/);
+    expect(
+      records.filter((record) => /^5(?:220|225).{90}$/.test(record)),
+    ).toHaveLength(2);
+    expect(
+      records.filter((record) => /^6(?:22|27).{91}$/.test(record)),
+    ).toHaveLength(3);
+    expect(records.filter((record) => /^8.{93}$/.test(record))).toHaveLength(2);
+    expect(records.filter((record) => /^9.{93}$/.test(record))).toHaveLength(
+      records.length - 8,
+    );
+    expect(
+      records
+        .filter((record) => /^6(?:22|27)/.test(record))
+        .map((record) => record.slice(29, 39)),
+    ).toEqual(['0000001200', '0000002300', '0000003400']);
+    expect(
+      records
+        .filter((record) => /^6(?:22|27)/.test(record))
+        .map((record) => record.slice(3, 11)),
+    ).toEqual(['02100002', '01100001', '03100050']);
+    expect(
+      records
+        .filter((record) => /^6(?:22|27)/.test(record))
+        .map((record) => record.slice(78, 93)),
+    ).toEqual(['000000000000001', '000000000000002', '000000000000001']);
+    const batchControls = records.filter((record) => record.startsWith('8'));
+    expect(
+      batchControls.map((record) => ({
+        serviceClass: record.slice(1, 4),
+        entryCount: record.slice(4, 10),
+        entryHash: record.slice(10, 20),
+        debitTotal: record.slice(20, 30),
+        creditTotal: record.slice(30, 40),
+      })),
+    ).toEqual([
+      {
+        serviceClass: '200',
+        entryCount: '000002',
+        entryHash: '0003200003',
+        debitTotal: '0000003500',
+        creditTotal: '0000000000',
+      },
+      {
+        serviceClass: '200',
+        entryCount: '000001',
+        entryHash: '0003100050',
+        debitTotal: '0000000000',
+        creditTotal: '0000003400',
+      },
+    ]);
     expect(records.at(-1)).toBe('9'.repeat(94));
     expect(file).toMatchObject({
       totalEntries: 3,
@@ -7017,11 +7078,22 @@ describe('Outbox worker (integration)', () => {
     expect(file.sha256).toBe(
       createHash('sha256').update(generated.file).digest('hex'),
     );
-    expect(
-      records
-        .find((record) => record[0] === '9' && record !== '9'.repeat(94))
-        ?.slice(7, 13),
-    ).toBe(String(records.length / 10).padStart(6, '0'));
+    const fileControlIndex = records.findIndex(
+      (record) => record[0] === '9' && record !== '9'.repeat(94),
+    );
+    const fileControl = records[fileControlIndex];
+    expect(fileControl).toBeDefined();
+    expect(fileControl.slice(1, 7)).toBe('000002');
+    expect(fileControl.slice(7, 13)).toBe(
+      String(records.length / 10).padStart(6, '0'),
+    );
+    expect(fileControl.slice(13, 21)).toBe('00000003');
+    expect(fileControl.slice(21, 31)).toBe('0006300053');
+    expect(fileControl.slice(31, 41)).toBe('0000003500');
+    expect(fileControl.slice(41, 51)).toBe('0000003400');
+    expect(records.slice(fileControlIndex + 1)).toEqual(
+      Array(records.length - fileControlIndex - 1).fill('9'.repeat(94)),
+    );
     expect(await generator.generate(date)).toBeNull();
     expect(await prismaOne.achFile.count()).toBe(1);
     expect(
@@ -7031,5 +7103,93 @@ describe('Outbox worker (integration)', () => {
     ).toBe(3);
     expect(await prismaOne.reservation.count()).toBe(0);
     expect(await prismaOne.ledgerEntry.count()).toBe(1);
+  });
+
+  it('generates separate NACHA files for eligible payments from different merchants', async () => {
+    const date = new Date('2026-07-30T00:00:00.000Z');
+    await prismaOne.merchant.create({
+      data: {
+        id: 'merchant-2',
+        merchantCode: 'WORKER_TWO',
+        legalName: 'Worker Two LLC',
+        displayName: 'Worker Two',
+        status: MerchantStatus.ACTIVE,
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: BigInt(10000),
+        dailyAmountLimit: BigInt(100000),
+      },
+    });
+    await prismaOne.payment.createMany({
+      data: [
+        {
+          id: 'merchant-one-export',
+          merchantId: 'merchant-1',
+          idempotencyKey: 'merchant-one-export-key',
+          requestFingerprint: 'merchant-one-export-fingerprint',
+          direction: PaymentDirection.DEBIT,
+          amountCents: BigInt(1200),
+          currency: 'USD',
+          receiverName: 'Merchant One Receiver',
+          receiverAccountRef: 'merchant-one-account',
+          routingNumber: '021000021',
+          status: PaymentStatus.VALIDATED,
+          validatedAt: date,
+        },
+        {
+          id: 'merchant-two-export',
+          merchantId: 'merchant-2',
+          idempotencyKey: 'merchant-two-export-key',
+          requestFingerprint: 'merchant-two-export-fingerprint',
+          direction: PaymentDirection.CREDIT,
+          amountCents: BigInt(3400),
+          currency: 'USD',
+          receiverName: 'Merchant Two Receiver',
+          receiverAccountRef: 'merchant-two-account',
+          routingNumber: '031000503',
+          status: PaymentStatus.VALIDATED,
+          validatedAt: date,
+        },
+      ],
+    });
+
+    const generated = await new NachaFileGeneratorService(
+      prismaOne,
+    ).generateAll(date);
+    expect(generated).toHaveLength(2);
+    const [first, second] = generated;
+    const files = await prismaOne.achFile.findMany({
+      include: { payments: { orderBy: { id: 'asc' } } },
+      orderBy: { companyId: 'asc' },
+    });
+    expect(files).toHaveLength(2);
+    expect(
+      files.map((file) => ({
+        companyId: file.companyId,
+        payments: file.payments.map((payment) => payment.id),
+      })),
+    ).toEqual([
+      { companyId: 'merchant-1', payments: ['merchant-one-export'] },
+      { companyId: 'merchant-2', payments: ['merchant-two-export'] },
+    ]);
+    expect(first.file.split('\n').every((record) => record.length === 94)).toBe(
+      true,
+    );
+    expect(
+      second.file.split('\n').every((record) => record.length === 94),
+    ).toBe(true);
+    const exportedPayments = await prismaOne.payment.findMany({
+      where: { id: { in: ['merchant-one-export', 'merchant-two-export'] } },
+      select: { status: true, exportedAt: true, achFileId: true },
+    });
+    expect(exportedPayments).toHaveLength(2);
+    expect(
+      exportedPayments.every(
+        (payment) =>
+          payment.status === PaymentStatus.SUBMITTED &&
+          payment.exportedAt instanceof Date &&
+          payment.achFileId !== null,
+      ),
+    ).toBe(true);
   });
 });

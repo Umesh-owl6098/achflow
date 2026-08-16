@@ -1,0 +1,11 @@
+{
+  "totalCreditsCents": "<signed-decimal-string>",
+  "totalDebitsCents": "<signed-decimal-string>",
+  "netPositionCents": "<signed-decimal-string>",
+  "outstandingReservedAmountCents": "<unsigned-decimal-string>",
+  "entry": {
+    "entryKey": "<deterministic-entry-key>",
+    "entryType": "<LedgerEntryType>",
+    "runningBalanceCents": "<signed-decimal-string>"
+  }
+}

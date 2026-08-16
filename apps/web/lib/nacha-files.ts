@@ -32,7 +32,7 @@ export type NachaFile = {
 };
 
 export type NachaFilesData = {
-  merchant: { merchantCode: string; displayName: string };
+  merchant: { merchantCode: string; displayName: string } | null;
   data: NachaFile[];
   summary: {
     filesGeneratedToday: number;
@@ -43,6 +43,7 @@ export type NachaFilesData = {
 };
 
 export type NachaFilesFilters = {
+  merchantId?: string;
   search: string;
   status: "" | NachaSubmissionStatus;
   dateRange: NachaDateRange;
@@ -54,8 +55,7 @@ export function parseNachaFilesData(value: unknown): NachaFilesData {
   if (
     !isRecord(value) ||
     !Array.isArray(value.data) ||
-    !isRecord(value.summary) ||
-    !isRecord(value.merchant)
+    !isRecord(value.summary)
   ) {
     throw new Error("The NACHA files response has an invalid format.");
   }
@@ -77,6 +77,7 @@ export function parseNachaFilesData(value: unknown): NachaFilesData {
 export function nachaFilesSearchParams(filters: NachaFilesFilters): string {
   const params = new URLSearchParams({ dateRange: filters.dateRange });
   if (filters.search.trim()) params.set("search", filters.search.trim());
+  if (filters.merchantId) params.set("merchantId", filters.merchantId);
   if (filters.status) params.set("status", filters.status);
   if (filters.dateRange === "custom") {
     if (filters.startDate) params.set("startDate", filters.startDate);

@@ -1,0 +1,14 @@
+{
+  "recordWidth": 94,
+  "recordCountMultiple": 10,
+  "recordTypes": ["1", "5", "6", "8", "9"],
+  "fillerRecord": "<94 nines>",
+  "controlFields": [
+    "batchCount",
+    "entryAddendaCount",
+    "entryHash",
+    "debitTotalCents",
+    "creditTotalCents",
+    "blockCount"
+  ]
+}

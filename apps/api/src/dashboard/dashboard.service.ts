@@ -19,6 +19,14 @@ export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getDashboard(merchant: AuthenticatedMerchant) {
+    return this.getDashboardForMerchant(merchant.id);
+  }
+
+  async getAdminDashboard(merchantId?: string) {
+    return this.getDashboardForMerchant(merchantId);
+  }
+
+  private async getDashboardForMerchant(merchantId?: string) {
     const now = new Date();
     const todayStart = startOfUtcDay(now);
     const tomorrowStart = addUtcDays(todayStart, 1);
@@ -26,15 +34,15 @@ export class DashboardService {
 
     const [todayPayments, weeklyPayments, statusGroups, recentPayments] =
       await Promise.all([
-        this.paymentsBetween(merchant.id, todayStart, tomorrowStart),
-        this.paymentsBetween(merchant.id, sevenDaysStart, tomorrowStart),
+        this.paymentsBetween(merchantId, todayStart, tomorrowStart),
+        this.paymentsBetween(merchantId, sevenDaysStart, tomorrowStart),
         this.prisma.payment.groupBy({
           by: ['status'],
-          where: { merchantId: merchant.id },
+          where: merchantId ? { merchantId } : {},
           _count: { _all: true },
         }),
         this.prisma.payment.findMany({
-          where: { merchantId: merchant.id },
+          where: merchantId ? { merchantId } : {},
           include: {
             merchant: { select: { merchantCode: true, displayName: true } },
           },
@@ -53,12 +61,15 @@ export class DashboardService {
   }
 
   private paymentsBetween(
-    merchantId: string,
+    merchantId: string | undefined,
     start: Date,
     end: Date,
   ): Promise<DashboardPayment[]> {
     return this.prisma.payment.findMany({
-      where: { merchantId, createdAt: { gte: start, lt: end } },
+      where: {
+        ...(merchantId ? { merchantId } : {}),
+        createdAt: { gte: start, lt: end },
+      },
       include: {
         merchant: { select: { merchantCode: true, displayName: true } },
       },

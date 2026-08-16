@@ -8,5 +8,6 @@ import { NachaFilesService } from './nacha-files.service';
   imports: [AuthModule, RateLimitModule],
   controllers: [NachaFilesController],
   providers: [NachaFilesService],
+  exports: [NachaFilesService],
 })
 export class NachaFilesModule {}

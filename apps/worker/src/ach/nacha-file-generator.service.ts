@@ -13,19 +13,32 @@ const field = (value: string, length: number, fill = ' ', right = false) =>
     ? value.slice(-length).padStart(length, fill)
     : value.slice(0, length).padEnd(length, fill);
 const cents = (value: bigint) => field(value.toString(), 10, '0', true);
+type GeneratedNachaFile = {
+  file: string;
+  metadata: {
+    id: string;
+    totalEntries: number;
+    debitTotalCents: bigint;
+    creditTotalCents: bigint;
+    entryHash: string;
+  };
+};
 @Injectable()
 export class NachaFileGeneratorService {
   constructor(private readonly prisma: WorkerPrismaService) {}
-  async generate(effectiveDate = new Date()): Promise<{
-    file: string;
-    metadata: {
-      id: string;
-      totalEntries: number;
-      debitTotalCents: bigint;
-      creditTotalCents: bigint;
-      entryHash: string;
-    };
-  } | null> {
+
+  async generateAll(effectiveDate = new Date()) {
+    const files: GeneratedNachaFile[] = [];
+    for (;;) {
+      const generated = await this.generate(effectiveDate);
+      if (!generated) return files;
+      files.push(generated);
+    }
+  }
+
+  async generate(
+    effectiveDate = new Date(),
+  ): Promise<GeneratedNachaFile | null> {
     const day = new Date(
       Date.UTC(
         effectiveDate.getUTCFullYear(),
@@ -34,19 +47,26 @@ export class NachaFileGeneratorService {
       ),
     );
     return this.prisma.$transaction(async (tx) => {
-      const payments = await tx.payment.findMany({
+      const firstEligible = await tx.payment.findFirst({
         where: {
           status: PaymentStatus.VALIDATED,
           exportedAt: null,
           direction: { in: [PaymentDirection.DEBIT, PaymentDirection.CREDIT] },
         },
+        select: { merchantId: true },
+        orderBy: [{ merchantId: 'asc' }, { id: 'asc' }],
+      });
+      if (!firstEligible) return null;
+      const eligible = await tx.payment.findMany({
+        where: {
+          status: PaymentStatus.VALIDATED,
+          exportedAt: null,
+          merchantId: firstEligible.merchantId,
+          direction: { in: [PaymentDirection.DEBIT, PaymentDirection.CREDIT] },
+        },
         include: { merchant: true },
         orderBy: { id: 'asc' },
       });
-      const eligible = payments.filter(
-        (payment) => payment.direction === PaymentDirection.DEBIT || true,
-      );
-      if (!eligible.length) return null;
       const debit = eligible
         .filter((p) => p.direction === PaymentDirection.DEBIT)
         .reduce((sum, p) => sum + p.amountCents, BigInt(0));

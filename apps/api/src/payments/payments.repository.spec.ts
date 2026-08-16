@@ -1,4 +1,4 @@
-import { OutboxEventType, PaymentDirection } from '@prisma/client';
+import { OutboxEventType, PaymentDirection, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentRecord, PaymentsRepository } from './payments.repository';
 
@@ -32,28 +32,31 @@ describe('PaymentsRepository', () => {
   };
 
   it('creates a payment and safe outbox event in one transaction', async () => {
-    const transaction = {
-      payment: { create: jest.fn().mockResolvedValue(payment) },
-      outboxEvent: { create: jest.fn().mockResolvedValue({ id: 'evt-1' }) },
-    };
-    const prisma = {
-      $transaction: jest.fn(
-        <T>(callback: (client: typeof transaction) => Promise<T>): Promise<T> =>
-          callback(transaction),
-      ),
-    };
-    const repository = new PaymentsRepository(prisma as PrismaService);
+    const createPayment = jest.fn().mockResolvedValue(payment);
+    const createOutboxEvent = jest.fn().mockResolvedValue({ id: 'evt-1' });
+    const transaction = Object.create(
+      PrismaService.prototype,
+    ) as Prisma.TransactionClient;
+    Object.defineProperties(transaction, {
+      payment: { value: { create: createPayment } },
+      outboxEvent: { value: { create: createOutboxEvent } },
+    });
+    const prisma = Object.create(PrismaService.prototype) as PrismaService;
+    const transactionSpy = jest
+      .spyOn(prisma, '$transaction')
+      .mockImplementation((callback) => callback(transaction));
+    const repository = new PaymentsRepository(prisma);
 
     await expect(repository.createWithOutbox(data)).resolves.toBe(payment);
 
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(transaction.payment.create).toHaveBeenCalledWith({
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+    expect(createPayment).toHaveBeenCalledWith({
       data,
       include: {
         merchant: { select: { merchantCode: true, displayName: true } },
       },
     });
-    expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+    expect(createOutboxEvent).toHaveBeenCalledWith({
       data: {
         eventKey: `payment:${payment.id}:PAYMENT_RECEIVED`,
         eventType: OutboxEventType.PAYMENT_RECEIVED,
@@ -75,19 +78,22 @@ describe('PaymentsRepository', () => {
   });
 
   it('propagates an outbox write failure so the transaction can roll back', async () => {
-    const transaction = {
-      payment: { create: jest.fn().mockResolvedValue(payment) },
-      outboxEvent: {
-        create: jest.fn().mockRejectedValue(new Error('outbox write failed')),
-      },
-    };
-    const prisma = {
-      $transaction: jest.fn(
-        <T>(callback: (client: typeof transaction) => Promise<T>): Promise<T> =>
-          callback(transaction),
-      ),
-    };
-    const repository = new PaymentsRepository(prisma as PrismaService);
+    const createPayment = jest.fn().mockResolvedValue(payment);
+    const createOutboxEvent = jest
+      .fn()
+      .mockRejectedValue(new Error('outbox write failed'));
+    const transaction = Object.create(
+      PrismaService.prototype,
+    ) as Prisma.TransactionClient;
+    Object.defineProperties(transaction, {
+      payment: { value: { create: createPayment } },
+      outboxEvent: { value: { create: createOutboxEvent } },
+    });
+    const prisma = Object.create(PrismaService.prototype) as PrismaService;
+    jest
+      .spyOn(prisma, '$transaction')
+      .mockImplementation((callback) => callback(transaction));
+    const repository = new PaymentsRepository(prisma);
 
     await expect(repository.createWithOutbox(data)).rejects.toThrow(
       'outbox write failed',

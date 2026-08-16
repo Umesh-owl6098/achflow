@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { serverApiBaseUrl as base } from "@/lib/server-api-base-url";
 
-const base =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3000/api/v1";
 async function forward(request: NextRequest) {
   const key = process.env.ACHFLOW_API_KEY;
   if (!key)

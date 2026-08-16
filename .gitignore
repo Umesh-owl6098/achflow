@@ -38,6 +38,7 @@ apps/web/dist/
 # Next.js and TypeScript
 apps/web/.next/
 apps/web/test-results/
+evals/results/
 *.tsbuildinfo
 
 # Prisma

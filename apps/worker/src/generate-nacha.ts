@@ -7,22 +7,23 @@ async function run(): Promise<void> {
 
   try {
     const generator = app.get(NachaFileGeneratorService);
-    const result = await generator.generate(new Date());
+    const results = await generator.generateAll(new Date());
 
-    if (!result) {
+    if (!results.length) {
       console.log('No eligible VALIDATED payments found.');
       return;
     }
 
-    console.log('--- NACHA METADATA ---');
-    console.log({
-      ...result.metadata,
-      debitTotalCents: result.metadata.debitTotalCents.toString(),
-      creditTotalCents: result.metadata.creditTotalCents.toString(),
-    });
-
-    console.log('--- NACHA FILE ---');
-    console.log(result.file);
+    for (const result of results) {
+      console.log('--- NACHA METADATA ---');
+      console.log({
+        ...result.metadata,
+        debitTotalCents: result.metadata.debitTotalCents.toString(),
+        creditTotalCents: result.metadata.creditTotalCents.toString(),
+      });
+      console.log('--- NACHA FILE ---');
+      console.log(result.file);
+    }
   } finally {
     await app.close();
   }

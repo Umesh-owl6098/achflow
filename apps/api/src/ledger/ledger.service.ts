@@ -17,9 +17,24 @@ export class LedgerService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(query: ListLedgerQueryDto, merchant: AuthenticatedMerchant) {
+    return this.listForScope(query, merchant.id, {
+      merchantCode: merchant.merchantCode,
+      displayName: merchant.displayName,
+    });
+  }
+
+  async listAdmin(query: ListLedgerQueryDto, merchantId?: string) {
+    return this.listForScope(query, merchantId, null);
+  }
+
+  private async listForScope(
+    query: ListLedgerQueryDto,
+    merchantId: string | undefined,
+    merchant: { merchantCode: string; displayName: string } | null,
+  ) {
     const [entries, fundingAccounts] = await Promise.all([
       this.prisma.ledgerEntry.findMany({
-        where: { fundingAccount: { merchantId: merchant.id } },
+        where: merchantId ? { fundingAccount: { merchantId } } : {},
         include: {
           fundingAccount: {
             include: {
@@ -30,7 +45,7 @@ export class LedgerService {
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       }),
       this.prisma.fundingAccount.findMany({
-        where: { merchantId: merchant.id },
+        where: merchantId ? { merchantId } : {},
         select: { id: true },
       }),
     ]);
@@ -40,7 +55,10 @@ export class LedgerService {
     );
     const [payments, reservations, activeReservations] = await Promise.all([
       this.prisma.payment.findMany({
-        where: { merchantId: merchant.id, id: { in: paymentIds } },
+        where: {
+          ...(merchantId ? { merchantId } : {}),
+          id: { in: paymentIds },
+        },
         select: {
           id: true,
           externalReference: true,
@@ -174,10 +192,7 @@ export class LedgerService {
     );
 
     return {
-      merchant: {
-        merchantCode: merchant.merchantCode,
-        displayName: merchant.displayName,
-      },
+      merchant,
       data: filteredRows,
       summary: {
         totalCreditsCents: summary.creditTotalCents.toString(),

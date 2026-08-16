@@ -31,6 +31,7 @@ import {
 } from "@/lib/ledger";
 
 const initialFilters: LedgerFilters = {
+  merchantId: "",
   search: "",
   entryType: "",
   dateRange: "all",
@@ -47,6 +48,38 @@ async function loadLedger(filters: LedgerFilters): Promise<LedgerData> {
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error("Ledger data is unavailable.");
   return parseLedgerData(body);
+}
+
+type MerchantOption = { id: string; displayName: string; merchantCode: string };
+
+async function loadMerchants(): Promise<MerchantOption[]> {
+  const response = await fetch("/api/admin/merchants", {
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    !body ||
+    typeof body !== "object" ||
+    !("data" in body) ||
+    !Array.isArray(body.data)
+  ) {
+    throw new Error("Merchant data is unavailable.");
+  }
+  return body.data.filter(isMerchantOption);
+}
+
+function isMerchantOption(value: unknown): value is MerchantOption {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "id" in value &&
+    "displayName" in value &&
+    "merchantCode" in value &&
+    typeof value.id === "string" &&
+    typeof value.displayName === "string" &&
+    typeof value.merchantCode === "string"
+  );
 }
 
 function useDebouncedValue(value: string, delay = 300): string {
@@ -66,6 +99,10 @@ export function LedgerTable() {
   const query = useQuery({
     queryKey: ["ledger", queryFilters],
     queryFn: () => loadLedger(queryFilters),
+  });
+  const merchantsQuery = useQuery({
+    queryKey: ["admin-merchants"],
+    queryFn: loadMerchants,
   });
 
   function updateFilters(update: Partial<LedgerFilters>) {
@@ -88,7 +125,7 @@ export function LedgerTable() {
     <div className="space-y-5">
       <PageHeader
         title="Ledger"
-        description="Immutable funding-account movements for the authenticated merchant."
+        description="Immutable funding-account movements across the selected operations scope."
         actions={
           <Button
             variant="outline"
@@ -115,12 +152,21 @@ export function LedgerTable() {
         </label>
         <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
           Merchant scope
-          <input
+          <select
             aria-label="Merchant filter"
-            value={data.merchant.displayName}
-            readOnly
+            value={filters.merchantId}
+            onChange={(event) =>
+              updateFilters({ merchantId: event.target.value })
+            }
             className="mt-1 block h-9 w-full rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
-          />
+          >
+            <option value="">All merchants</option>
+            {(merchantsQuery.data ?? []).map((merchant) => (
+              <option key={merchant.id} value={merchant.id}>
+                {merchant.displayName} ({merchant.merchantCode})
+              </option>
+            ))}
+          </select>
         </label>
         <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
           Entry type

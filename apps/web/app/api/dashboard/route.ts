@@ -1,25 +1,27 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { serverApiBaseUrl as apiBaseUrl } from "@/lib/server-api-base-url";
 
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3000/api/v1";
-
-export async function GET() {
-  const apiKey = process.env.ACHFLOW_API_KEY;
+export async function GET(request: NextRequest) {
+  const apiKey = process.env.ACHFLOW_ADMIN_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { message: "Dashboard API access is not configured." },
+      { message: "Admin dashboard API access is not configured." },
       { status: 500 },
     );
   }
   try {
-    const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/dashboard`, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
+    const query = request.nextUrl.searchParams.toString();
+    const response = await fetch(
+      `${apiBaseUrl.replace(/\/$/, "")}/admin/dashboard${query ? `?${query}` : ""}`,
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
       },
-      cache: "no-store",
-      signal: AbortSignal.timeout(10_000),
-    });
+    );
     const body: unknown = await response.json().catch(() => null);
     if (!response.ok) {
       return NextResponse.json(

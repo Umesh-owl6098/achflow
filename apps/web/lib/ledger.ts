@@ -1,6 +1,7 @@
 export type LedgerDateRange = "all" | "today" | "7d" | "30d" | "custom";
 
 export type LedgerFilters = {
+  merchantId?: string;
   search: string;
   entryType: string;
   dateRange: LedgerDateRange;
@@ -44,7 +45,7 @@ export type LedgerRow = {
 };
 
 export type LedgerData = {
-  merchant: { merchantCode: string; displayName: string };
+  merchant: { merchantCode: string; displayName: string } | null;
   data: LedgerRow[];
   summary: {
     totalCreditsCents: string;
@@ -69,7 +70,6 @@ export const ledgerEntryTypes = [
 export function parseLedgerData(value: unknown): LedgerData {
   if (
     !isRecord(value) ||
-    !isRecord(value.merchant) ||
     !Array.isArray(value.data) ||
     !isRecord(value.summary) ||
     !value.data.every(isLedgerRow)
@@ -93,6 +93,7 @@ export function parseLedgerData(value: unknown): LedgerData {
 export function ledgerSearchParams(filters: LedgerFilters): string {
   const params = new URLSearchParams({ dateRange: filters.dateRange });
   if (filters.search.trim()) params.set("search", filters.search.trim());
+  if (filters.merchantId) params.set("merchantId", filters.merchantId);
   if (filters.entryType) params.set("entryType", filters.entryType);
   if (filters.dateRange === "custom") {
     if (filters.startDate) params.set("startDate", filters.startDate);

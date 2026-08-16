@@ -3,15 +3,19 @@ services:
     image: postgres:16-alpine
     container_name: achflow-postgres
     environment:
-      POSTGRES_USER: achflow
-      POSTGRES_PASSWORD: achflow
-      POSTGRES_DB: achflow
+      POSTGRES_USER: ${POSTGRES_USER:-achflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-achflow}
+      POSTGRES_DB: ${POSTGRES_DB:-achflow}
     ports:
       - "5435:5432"
     volumes:
       - achflow_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U achflow -d achflow"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-achflow} -d ${POSTGRES_DB:-achflow}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -29,6 +33,83 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.api
+      target: build
+    container_name: achflow-migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://achflow:achflow@postgres:5432/achflow?schema=public}
+    command: ["pnpm", "--filter", "api", "exec", "prisma", "migrate", "deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: achflow-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://achflow:achflow@postgres:5432/achflow?schema=public}
+      PORT: ${API_PORT:-3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MERCHANT_API_KEY_HASH_SECRET: ${MERCHANT_API_KEY_HASH_SECRET}
+      ACHFLOW_ADMIN_API_KEY: ${ACHFLOW_ADMIN_API_KEY}
+      WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY}
+      WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION: ${WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION:-v1}
+      PAYMENT_API_RATE_LIMIT_MAX_REQUESTS: ${PAYMENT_API_RATE_LIMIT_MAX_REQUESTS:-100}
+      PAYMENT_API_RATE_LIMIT_WINDOW_SECONDS: ${PAYMENT_API_RATE_LIMIT_WINDOW_SECONDS:-60}
+      PAYMENT_API_RATE_LIMIT_NAMESPACE: ${PAYMENT_API_RATE_LIMIT_NAMESPACE:-achflow:payment-rate-limit}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: achflow-worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://achflow:achflow@postgres:5432/achflow?schema=public}
+      WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY}
+      WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION: ${WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION:-v1}
+      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-25}
+      OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-5}
+      OUTBOX_CLAIM_LEASE_MS: ${OUTBOX_CLAIM_LEASE_MS:-60000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3000/api/v1}
+    container_name: achflow-web
+    environment:
+      PORT: ${WEB_PORT:-3001}
+      HOSTNAME: 0.0.0.0
+      API_BASE_URL: ${API_BASE_URL:-http://api:3000/api/v1}
+      ACHFLOW_API_KEY: ${ACHFLOW_API_KEY:-}
+      ACHFLOW_ADMIN_API_KEY: ${ACHFLOW_ADMIN_API_KEY}
+    ports:
+      - "${WEB_PORT:-3001}:3001"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
   achflow_postgres_data:

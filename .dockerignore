@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/coverage
+.git
+.gitignore
+**/.env
+**/.env.*
+!**/.env.example
+**/.agents
+**/.claude
+**/.windsurf
+**/skills-lock.json
+**/*.md
+!README.md
+**/.DS_Store

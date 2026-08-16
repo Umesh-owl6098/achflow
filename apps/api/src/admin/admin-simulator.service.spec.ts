@@ -51,7 +51,10 @@ describe('AdminSimulatorService', () => {
       prisma as never,
       payments as never,
     );
-    jest.spyOn(service as never, 'sleep').mockResolvedValue(undefined);
+    const prototype = Object.getPrototypeOf(service) as {
+      sleep(milliseconds: number): Promise<void>;
+    };
+    jest.spyOn(prototype, 'sleep').mockResolvedValue(undefined);
 
     await service.createRun({
       merchantIds: ['merchant-1'],
@@ -74,11 +77,20 @@ describe('AdminSimulatorService', () => {
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(prisma.merchant.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ status: MerchantStatus.ACTIVE }),
-      }),
-    );
+    expect(prisma.merchant.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['merchant-1'] },
+        status: MerchantStatus.ACTIVE,
+      },
+      select: {
+        id: true,
+        merchantCode: true,
+        displayName: true,
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: true,
+      },
+    });
     expect(payments.create).toHaveBeenCalledWith(
       expect.objectContaining({
         merchantCode: 'SIMULATOR',

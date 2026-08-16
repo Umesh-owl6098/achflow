@@ -13,6 +13,12 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
+    "eval": "node --experimental-strip-types evals/run-evals.ts --all",
+    "eval:deterministic": "node --experimental-strip-types evals/run-evals.ts --category deterministic",
+    "eval:consistency": "node --experimental-strip-types evals/run-evals.ts --category consistency",
+    "eval:regex": "node --experimental-strip-types evals/run-evals.ts --category regex",
+    "eval:red-team": "node --experimental-strip-types evals/run-evals.ts --category red-team",
+    "eval:regression": "node --experimental-strip-types evals/run-evals.ts --category regression",
     "format": "prettier --write .",
     "clean": "find . -name node_modules -type d -prune -exec rm -rf {} +"
   },

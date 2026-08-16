@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { AdminApiKeyGuard } from './admin-api-key.guard';
 import { AdminSimulatorService } from './admin-simulator.service';
 import { CreateSimulatorRunDto } from './dto/create-simulator-run.dto';
+import { ProvisionSimulatorFundingDto } from './dto/provision-simulator-funding.dto';
 
 @Controller('api/v1/admin/simulator')
 @UseGuards(AdminApiKeyGuard)
@@ -36,5 +37,13 @@ export class AdminSimulatorController {
   @Post('runs/:runId/stop')
   stop(@Param('runId') runId: string) {
     return this.simulator.stop(runId);
+  }
+
+  @Post('merchants/:merchantId/demo-funding')
+  provisionFunding(
+    @Param('merchantId') merchantId: string,
+    @Body() dto: ProvisionSimulatorFundingDto,
+  ) {
+    return this.simulator.provisionDemoFunding(merchantId, dto);
   }
 }

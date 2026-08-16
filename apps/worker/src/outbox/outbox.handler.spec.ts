@@ -11,6 +11,7 @@ describe('OutboxHandler', () => {
     await expect(
       handler.handle({
         id: 'evt-1',
+        eventKey: 'payment:pay-1:UNKNOWN',
         eventType: 'UNKNOWN' as OutboxEventType,
         aggregateType: 'PAYMENT',
         aggregateId: 'pay-1',

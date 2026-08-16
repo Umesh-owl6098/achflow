@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { serverApiBaseUrl as base } from "@/lib/server-api-base-url";
 
-const base =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3000/api/v1";
 const actions = new Set(["pause", "resume", "stop"]);
 
 export async function POST(

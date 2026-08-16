@@ -5,11 +5,16 @@ import {
   IsIn,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
 } from 'class-validator';
 import { LedgerEntryType } from '@prisma/client';
 
 export class ListLedgerQueryDto {
+  @IsOptional()
+  @IsUUID()
+  merchantId?: string;
+
   @IsOptional()
   @IsString()
   search?: string;

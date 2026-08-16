@@ -3,11 +3,40 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { MerchantStatus, PaymentStatus } from '@prisma/client';
+import {
+  LedgerEntryType,
+  MerchantStatus,
+  PaymentStatus,
+  Prisma,
+  ReservationStatus,
+} from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { MerchantAuthenticationService } from '../auth/merchant-authentication.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateMerchantDto } from './dto/create-merchant.dto';
+
+const merchantListInclude = {
+  _count: { select: { payments: true, webhookEndpoints: true } },
+  payments: { select: { amountCents: true, status: true } },
+  fundingAccounts: { include: { reservations: true, entries: true } },
+} satisfies Prisma.MerchantInclude;
+
+const merchantDetailInclude = {
+  apiKey: { select: { id: true, createdAt: true } },
+  _count: { select: { payments: true, webhookEndpoints: true } },
+  payments: { orderBy: { createdAt: 'desc' }, take: 10 },
+  webhookEndpoints: {
+    select: { id: true, url: true, isActive: true, createdAt: true },
+  },
+  fundingAccounts: { include: { reservations: true, entries: true } },
+} satisfies Prisma.MerchantInclude;
+
+type MerchantListRow = Prisma.MerchantGetPayload<{
+  include: typeof merchantListInclude;
+}>;
+type MerchantDetail = Prisma.MerchantGetPayload<{
+  include: typeof merchantDetailInclude;
+}>;
 
 @Injectable()
 export class AdminMerchantsService {
@@ -18,9 +47,7 @@ export class AdminMerchantsService {
   async list() {
     const merchants = await this.prisma.merchant.findMany({
       include: {
-        _count: { select: { payments: true, webhookEndpoints: true } },
-        payments: { select: { amountCents: true, status: true } },
-        fundingAccounts: { include: { reservations: true, entries: true } },
+        ...merchantListInclude,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -29,15 +56,7 @@ export class AdminMerchantsService {
   async details(id: string) {
     const merchant = await this.prisma.merchant.findUnique({
       where: { id },
-      include: {
-        apiKey: { select: { id: true, createdAt: true } },
-        _count: { select: { payments: true, webhookEndpoints: true } },
-        payments: { orderBy: { createdAt: 'desc' }, take: 10 },
-        webhookEndpoints: {
-          select: { id: true, url: true, isActive: true, createdAt: true },
-        },
-        fundingAccounts: { include: { reservations: true, entries: true } },
-      },
+      include: merchantDetailInclude,
     });
     if (!merchant) throw new NotFoundException('Merchant was not found.');
     return this.detail(merchant);
@@ -113,25 +132,25 @@ export class AdminMerchantsService {
       JSON.stringify({ event: 'admin.audit', action, merchantId, ...metadata }),
     );
   }
-  private row(m: any) {
+  private row(m: MerchantListRow) {
     const volume = m.payments.reduce(
       (sum: bigint, p: { amountCents: bigint; status: PaymentStatus }) =>
         sum + (p.status === PaymentStatus.SETTLED ? p.amountCents : 0n),
       0n,
     );
     const reserved = m.fundingAccounts
-      .flatMap((account: any) => account.reservations)
-      .filter((reservation: any) => reservation.status === 'ACTIVE')
-      .reduce((sum: bigint, reservation: any) => sum + reservation.amount, 0n);
+      .flatMap((account) => account.reservations)
+      .filter((reservation) => reservation.status === ReservationStatus.ACTIVE)
+      .reduce((sum, reservation) => sum + reservation.amount, 0n);
     const posted = m.fundingAccounts
-      .flatMap((account: any) => account.entries)
+      .flatMap((account) => account.entries)
       .reduce(
-        (sum: bigint, entry: any) =>
+        (sum, entry) =>
           sum +
-          (entry.entryType === 'DEBIT_POSTED'
+          (entry.entryType === LedgerEntryType.DEBIT_POSTED
             ? -entry.amount
-            : entry.entryType === 'INITIAL_CREDIT' ||
-                entry.entryType === 'CREDIT_POSTED'
+            : entry.entryType === LedgerEntryType.INITIAL_CREDIT ||
+                entry.entryType === LedgerEntryType.CREDIT_POSTED
               ? entry.amount
               : 0n),
         0n,
@@ -150,26 +169,26 @@ export class AdminMerchantsService {
       availableBalanceCents: (posted - reserved).toString(),
     };
   }
-  private detail(m: any) {
+  private detail(m: MerchantDetail) {
     const volume = m.payments.reduce(
       (sum: bigint, p: { amountCents: bigint; status: PaymentStatus }) =>
         sum + (p.status === PaymentStatus.SETTLED ? p.amountCents : 0n),
       0n,
     );
     const reserved = m.fundingAccounts
-      .flatMap((a: any) => a.reservations)
-      .filter((r: any) => r.status === 'ACTIVE')
-      .reduce((sum: bigint, r: any) => sum + r.amount, 0n);
+      .flatMap((account) => account.reservations)
+      .filter((reservation) => reservation.status === ReservationStatus.ACTIVE)
+      .reduce((sum, reservation) => sum + reservation.amount, 0n);
     const posted = m.fundingAccounts
-      .flatMap((a: any) => a.entries)
+      .flatMap((account) => account.entries)
       .reduce(
-        (sum: bigint, e: any) =>
+        (sum, entry) =>
           sum +
-          (e.entryType === 'DEBIT_POSTED'
-            ? -e.amount
-            : e.entryType === 'INITIAL_CREDIT' ||
-                e.entryType === 'CREDIT_POSTED'
-              ? e.amount
+          (entry.entryType === LedgerEntryType.DEBIT_POSTED
+            ? -entry.amount
+            : entry.entryType === LedgerEntryType.INITIAL_CREDIT ||
+                entry.entryType === LedgerEntryType.CREDIT_POSTED
+              ? entry.amount
               : 0n),
         0n,
       );
@@ -196,11 +215,11 @@ export class AdminMerchantsService {
       },
       totalProcessedVolumeCents: volume.toString(),
       paymentStatusBreakdown: countStatuses(m.payments),
-      recentPayments: m.payments.map((p: any) => ({
-        ...p,
-        amountCents: p.amountCents.toString(),
-        createdAt: p.createdAt.toISOString(),
-        updatedAt: p.updatedAt.toISOString(),
+      recentPayments: m.payments.map((payment) => ({
+        ...payment,
+        amountCents: payment.amountCents.toString(),
+        createdAt: payment.createdAt.toISOString(),
+        updatedAt: payment.updatedAt.toISOString(),
       })),
       webhookEndpoints: m.webhookEndpoints,
     };

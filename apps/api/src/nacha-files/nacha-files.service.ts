@@ -19,10 +19,25 @@ export class NachaFilesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(query: ListNachaFilesQueryDto, merchant: AuthenticatedMerchant) {
+    return this.listForScope(query, merchant.id, {
+      merchantCode: merchant.merchantCode,
+      displayName: merchant.displayName,
+    });
+  }
+
+  async listAdmin(query: ListNachaFilesQueryDto, merchantId?: string) {
+    return this.listForScope(query, merchantId, null);
+  }
+
+  private async listForScope(
+    query: ListNachaFilesQueryDto,
+    merchantId: string | undefined,
+    merchant: { merchantCode: string; displayName: string } | null,
+  ) {
     const { start, end } = dateRange(query);
     const files = await this.prisma.achFile.findMany({
       where: {
-        companyId: merchant.id,
+        ...(merchantId ? { companyId: merchantId } : {}),
         ...(start && end ? { createdAt: { gte: start, lt: end } } : {}),
         ...(query.search?.trim()
           ? {
@@ -40,7 +55,7 @@ export class NachaFilesService {
       },
       include: {
         payments: {
-          where: { merchantId: merchant.id },
+          where: merchantId ? { merchantId } : {},
           orderBy: { id: 'asc' },
           select: {
             id: true,
@@ -85,10 +100,7 @@ export class NachaFilesService {
       },
     );
     return {
-      merchant: {
-        merchantCode: merchant.merchantCode,
-        displayName: merchant.displayName,
-      },
+      merchant,
       data: filtered,
       summary: {
         filesGeneratedToday: summary.filesGeneratedToday,
@@ -100,11 +112,19 @@ export class NachaFilesService {
   }
 
   async download(fileId: string, merchant: AuthenticatedMerchant) {
+    return this.downloadForScope(fileId, merchant.id);
+  }
+
+  async downloadAdmin(fileId: string) {
+    return this.downloadForScope(fileId);
+  }
+
+  private async downloadForScope(fileId: string, merchantId?: string) {
     const file = await this.prisma.achFile.findFirst({
-      where: { id: fileId, companyId: merchant.id },
+      where: { id: fileId, ...(merchantId ? { companyId: merchantId } : {}) },
       include: {
         payments: {
-          where: { merchantId: merchant.id },
+          where: merchantId ? { merchantId } : {},
           include: { merchant: true },
           orderBy: { id: 'asc' },
         },

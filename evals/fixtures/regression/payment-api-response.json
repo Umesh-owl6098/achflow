@@ -1,0 +1,15 @@
+{
+  "id": "<uuid>",
+  "idempotencyKey": "<non-empty-client-key>",
+  "externalReference": "<string-or-null>",
+  "direction": "DEBIT|CREDIT",
+  "status": "RECEIVED|VALIDATED|VALIDATION_FAILED|SUBMITTED|SETTLED|RETURNED",
+  "amountCents": "<unsigned-decimal-string>",
+  "currency": "<ISO-4217-uppercase-code>",
+  "merchant": {
+    "merchantCode": "<merchant-code>",
+    "displayName": "<merchant-display-name>"
+  },
+  "createdAt": "<ISO-8601-timestamp>",
+  "updatedAt": "<ISO-8601-timestamp>"
+}

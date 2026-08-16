@@ -8,5 +8,6 @@ import { LedgerService } from './ledger.service';
   imports: [AuthModule, RateLimitModule],
   controllers: [LedgerController],
   providers: [LedgerService],
+  exports: [LedgerService],
 })
 export class LedgerModule {}

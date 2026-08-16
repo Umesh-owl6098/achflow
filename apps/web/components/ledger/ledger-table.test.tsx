@@ -133,11 +133,14 @@ describe("LedgerTable", () => {
       screen.getByPlaceholderText("Search payment, reference, merchant"),
       { target: { value: "invoice-001" } },
     );
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), {
-      timeout: 1000,
-    });
-    expect(String(fetchMock.mock.calls[1]?.[0])).toContain(
-      "search=invoice-001",
+    await waitFor(
+      () =>
+        expect(
+          fetchMock.mock.calls.some(([url]) =>
+            String(url).includes("search=invoice-001"),
+          ),
+        ).toBe(true),
+      { timeout: 1000 },
     );
   });
 

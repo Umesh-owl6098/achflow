@@ -8,6 +8,7 @@ import { OutboxRepository } from './outbox.repository';
 
 const event: OutboxEvent = {
   id: 'evt-1',
+  eventKey: 'payment:pay-1:PAYMENT_RECEIVED',
   eventType: OutboxEventType.PAYMENT_RECEIVED,
   aggregateType: 'PAYMENT',
   aggregateId: 'pay-1',

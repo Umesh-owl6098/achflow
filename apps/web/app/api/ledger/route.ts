@@ -1,20 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3000/api/v1";
+import { serverApiBaseUrl as apiBaseUrl } from "@/lib/server-api-base-url";
 
 export async function GET(request: NextRequest) {
-  const apiKey = process.env.ACHFLOW_API_KEY;
+  const apiKey = process.env.ACHFLOW_ADMIN_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { message: "Ledger API access is not configured." },
+      { message: "Admin ledger API access is not configured." },
       { status: 500 },
     );
   }
 
   try {
     const response = await fetch(
-      `${apiBaseUrl.replace(/\/$/, "")}/ledger?${request.nextUrl.searchParams.toString()}`,
+      `${apiBaseUrl.replace(/\/$/, "")}/admin/ledger?${request.nextUrl.searchParams.toString()}`,
       {
         headers: {
           Authorization: `Bearer ${apiKey}`,

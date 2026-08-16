@@ -4,6 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  FundingAccountStatus,
+  LedgerEntryType,
   MerchantStatus,
   PaymentDirection,
   Prisma,
@@ -18,9 +20,7 @@ import {
   CreateSimulatorRunDto,
   SimulatorDirection,
 } from './dto/create-simulator-run.dto';
-
-const MAX_TRANSACTION_COUNT = 500;
-const MAX_TRANSACTIONS_PER_SECOND = 25;
+import { ProvisionSimulatorFundingDto } from './dto/provision-simulator-funding.dto';
 
 @Injectable()
 export class AdminSimulatorService {
@@ -95,6 +95,53 @@ export class AdminSimulatorService {
     });
     void this.execute(run.id, dto, merchants);
     return this.serializeRun(run);
+  }
+
+  async provisionDemoFunding(
+    merchantId: string,
+    dto: ProvisionSimulatorFundingDto,
+  ) {
+    this.assertLocalDevelopment();
+    const amount = BigInt(dto.amountCents);
+    if (amount <= 0n) {
+      throw new BadRequestException('Demo funding amount must be positive.');
+    }
+    const currency = dto.currency.toUpperCase();
+    return this.prisma.$transaction(async (transaction) => {
+      const merchant = await transaction.merchant.findUnique({
+        where: { id: merchantId },
+        select: { id: true },
+      });
+      if (!merchant) throw new NotFoundException('Merchant was not found.');
+      const account = await transaction.fundingAccount.upsert({
+        where: { merchantId_currency: { merchantId, currency } },
+        create: { merchantId, currency, status: FundingAccountStatus.ACTIVE },
+        update: {},
+      });
+      if (account.status !== FundingAccountStatus.ACTIVE) {
+        throw new BadRequestException('Funding account is not active.');
+      }
+      const entryKey = `demo-funding:${merchantId}:${currency}`;
+      const existing = await transaction.ledgerEntry.findUnique({
+        where: { entryKey },
+      });
+      if (!existing) {
+        await transaction.ledgerEntry.create({
+          data: {
+            entryKey,
+            fundingAccountId: account.id,
+            entryType: LedgerEntryType.INITIAL_CREDIT,
+            amount,
+          },
+        });
+      }
+      return {
+        fundingAccountId: account.id,
+        currency,
+        amountCents: (existing?.amount ?? amount).toString(),
+        provisioned: !existing,
+      };
+    });
   }
 
   async pause(id: string) {

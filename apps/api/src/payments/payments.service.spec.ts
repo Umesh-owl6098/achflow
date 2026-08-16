@@ -277,13 +277,21 @@ describe('PaymentsService', () => {
     );
     repository.findIdempotencyRecord.mockResolvedValue(null);
 
-    await expect(
-      service.create(dto, dto.idempotencyKey, merchant),
-    ).rejects.toMatchObject({
-      status: 500,
-      message:
-        'Payment could not be read after a concurrent idempotency conflict.',
-    } satisfies Partial<InternalServerErrorException>);
+    let error: unknown;
+    try {
+      await service.create(dto, dto.idempotencyKey, merchant);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(InternalServerErrorException);
+    if (!(error instanceof InternalServerErrorException)) {
+      throw error;
+    }
+    expect(error.getStatus()).toBe(500);
+    expect(error.message).toBe(
+      'Payment could not be read after a concurrent idempotency conflict.',
+    );
 
     expect(repository.findIdempotencyRecord).toHaveBeenCalledTimes(4);
   });
