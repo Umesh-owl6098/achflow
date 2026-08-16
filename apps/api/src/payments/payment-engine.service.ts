@@ -183,10 +183,9 @@ export class PaymentEngineService {
       const reservation = await transaction.reservation.findUnique({
         where: { paymentId },
       });
-      if (!reservation)
-        throw new NotFoundException(
-          `Reservation for payment ${paymentId} was not found.`,
-        );
+      if (!reservation) {
+        return this.settleDebitPayment(transaction, paymentId);
+      }
       if (reservation.status === ReservationStatus.SETTLED) return reservation;
       if (reservation.status !== ReservationStatus.ACTIVE)
         throw new BadRequestException(
@@ -229,6 +228,77 @@ export class PaymentEngineService {
       });
       return settled;
     });
+  }
+
+  private async settleDebitPayment(
+    transaction: Prisma.TransactionClient,
+    paymentId: string,
+  ) {
+    await transaction.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${paymentId}, 0))`,
+    );
+    const payment = await transaction.payment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        merchantId: true,
+        direction: true,
+        amountCents: true,
+        currency: true,
+        status: true,
+      },
+    });
+    if (!payment) {
+      throw new NotFoundException(
+        `Reservation for payment ${paymentId} was not found.`,
+      );
+    }
+    if (payment.direction !== PaymentDirection.DEBIT) {
+      throw new NotFoundException(
+        `Reservation for payment ${paymentId} was not found.`,
+      );
+    }
+    if (payment.status === PaymentStatus.SETTLED) return null;
+    if (payment.status !== PaymentStatus.SUBMITTED) {
+      throw new BadRequestException('Payment is not submitted for settlement.');
+    }
+    const account = await transaction.fundingAccount.findUnique({
+      where: {
+        merchantId_currency: {
+          merchantId: payment.merchantId,
+          currency: payment.currency,
+        },
+      },
+    });
+    if (!account || account.status !== FundingAccountStatus.ACTIVE) {
+      throw new BadRequestException(
+        `No active ${payment.currency} funding account exists for merchant.`,
+      );
+    }
+    await transaction.payment.update({
+      where: { id: paymentId },
+      data: { status: PaymentStatus.SETTLED },
+    });
+    await transaction.ledgerEntry.create({
+      data: {
+        entryKey: `debit-posted:${paymentId}`,
+        fundingAccountId: account.id,
+        paymentId,
+        entryType: LedgerEntryType.DEBIT_POSTED,
+        amount: payment.amountCents,
+      },
+    });
+    const settledPayment = await transaction.payment.findUniqueOrThrow({
+      where: { id: paymentId },
+    });
+    await transaction.outboxEvent.create({
+      data: paymentLifecycleOutboxEvent(
+        settledPayment,
+        OutboxEventType.PAYMENT_SETTLED,
+        settledPayment.updatedAt,
+      ),
+    });
+    return null;
   }
 
   async returnSettlement(paymentId: string, returnCode: string) {
@@ -293,26 +363,33 @@ export class PaymentEngineService {
       include: { fundingAccount: true },
     });
     const [entries, outboxEvents] = await Promise.all([
-      reservation
-        ? this.prisma.ledgerEntry.findMany({
-            where: { paymentId },
-            orderBy: { createdAt: 'asc' },
-          })
-        : [],
+      this.prisma.ledgerEntry.findMany({
+        where: { paymentId },
+        orderBy: { createdAt: 'asc' },
+      }),
       this.prisma.outboxEvent.findMany({
         where: { aggregateId: paymentId, aggregateType: 'PAYMENT' },
         orderBy: { createdAt: 'asc' },
       }),
     ]);
-    const postedRows = reservation
+    const fundingAccountId =
+      reservation?.fundingAccountId ?? entries[0]?.fundingAccountId;
+    const fundingAccount =
+      reservation?.fundingAccount ??
+      (fundingAccountId
+        ? await this.prisma.fundingAccount.findUnique({
+            where: { id: fundingAccountId },
+          })
+        : null);
+    const postedRows = fundingAccountId
       ? await this.prisma.$queryRaw<{ total: bigint | null }[]>(
-          Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${reservation.fundingAccountId}`,
+          Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${fundingAccountId}`,
         )
       : [];
-    const active = reservation
+    const active = fundingAccountId
       ? await this.prisma.reservation.aggregate({
           where: {
-            fundingAccountId: reservation.fundingAccountId,
+            fundingAccountId,
             status: ReservationStatus.ACTIVE,
           },
           _sum: { amount: true },
@@ -323,7 +400,7 @@ export class PaymentEngineService {
     return {
       payment,
       reservation,
-      fundingAccount: reservation?.fundingAccount ?? null,
+      fundingAccount,
       ledgerSummary: {
         entries: entries.map((entry) => ({
           id: entry.id,

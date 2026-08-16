@@ -5056,6 +5056,9 @@ describe('Outbox worker (integration)', () => {
     const firstSettlement = await lifecycle.settleReservationForPayment(
       'first-settlement-payment',
     );
+    if (!firstSettlement) {
+      throw new Error('Expected the credit reservation to settle.');
+    }
     const reservationAfterFirst = await prismaOne.reservation.findUniqueOrThrow(
       {
         where: { paymentId: 'first-settlement-payment' },
@@ -5071,6 +5074,11 @@ describe('Outbox worker (integration)', () => {
     const secondSettlement = await lifecycle.settleReservationForPayment(
       'first-settlement-payment',
     );
+    if (!secondSettlement) {
+      throw new Error(
+        'Expected the settled credit reservation to be returned from the repository.',
+      );
+    }
     const reservations = await prismaOne.reservation.findMany({
       where: { paymentId: 'first-settlement-payment' },
     });
@@ -5213,6 +5221,11 @@ describe('Outbox worker (integration)', () => {
       firstSettlementPromise,
       secondSettlementPromise,
     ]);
+    if (!firstSettlement || !secondSettlement) {
+      throw new Error(
+        'Expected both concurrent credit settlements to return a reservation.',
+      );
+    }
 
     const reservations = await prismaOne.reservation.findMany({
       where: { paymentId: 'concurrent-settlement-payment' },
@@ -5283,6 +5296,135 @@ describe('Outbox worker (integration)', () => {
     expect(postedBalance).toBe(BigInt(10_000));
     expect(activeReservedAmount).toBe(BigInt(0));
     expect(postedBalance - activeReservedAmount).toBe(BigInt(10_000));
+  });
+
+  it('settles a submitted ACH debit exactly once across repeated and concurrent calls', async () => {
+    const submittedAt = new Date(Date.UTC(2026, 6, 29));
+    await prismaOne.payment.create({
+      data: {
+        id: 'concurrent-debit-settlement-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'concurrent-debit-settlement-idem',
+        requestFingerprint: 'concurrent-debit-settlement-fingerprint',
+        externalReference: 'concurrent-debit-settlement-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'concurrent-debit-settlement-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SUBMITTED,
+        validatedAt: submittedAt,
+        exportedAt: submittedAt,
+        createdAt: submittedAt,
+      },
+    });
+
+    const repositoryOne = new PaymentLifecycleRepository(prismaOne);
+    const repositoryTwo = new PaymentLifecycleRepository(prismaTwo);
+    const [first, second] = await Promise.all([
+      repositoryOne.settleReservationForPayment(
+        'concurrent-debit-settlement-payment',
+      ),
+      repositoryTwo.settleReservationForPayment(
+        'concurrent-debit-settlement-payment',
+      ),
+    ]);
+    const third = await repositoryOne.settleReservationForPayment(
+      'concurrent-debit-settlement-payment',
+    );
+
+    const [payment, reservations, debitEntries, settledEvents] =
+      await Promise.all([
+        prismaOne.payment.findUniqueOrThrow({
+          where: { id: 'concurrent-debit-settlement-payment' },
+        }),
+        prismaOne.reservation.findMany({
+          where: { paymentId: 'concurrent-debit-settlement-payment' },
+        }),
+        prismaOne.ledgerEntry.findMany({
+          where: {
+            paymentId: 'concurrent-debit-settlement-payment',
+            entryType: LedgerEntryType.DEBIT_POSTED,
+          },
+        }),
+        prismaOne.outboxEvent.findMany({
+          where: {
+            aggregateId: 'concurrent-debit-settlement-payment',
+            aggregateType: 'PAYMENT',
+            eventType: OutboxEventType.PAYMENT_SETTLED,
+          },
+        }),
+      ]);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(third).toBeNull();
+    expect(payment.status).toBe(PaymentStatus.SETTLED);
+    expect(reservations).toHaveLength(0);
+    expect(debitEntries).toEqual([
+      expect.objectContaining({
+        entryKey: 'debit-posted:concurrent-debit-settlement-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(2_500),
+      }),
+    ]);
+    expect(settledEvents).toHaveLength(1);
+    expect(await prismaOne.ledgerEntry.count()).toBe(2);
+  });
+
+  it('does not settle a submitted ACH debit without an active matching funding account', async () => {
+    const submittedAt = new Date(Date.UTC(2026, 6, 29));
+    await prismaOne.payment.create({
+      data: {
+        id: 'debit-settlement-without-account',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'debit-settlement-without-account-idem',
+        requestFingerprint: 'debit-settlement-without-account-fingerprint',
+        externalReference: 'debit-settlement-without-account-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'CAD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'debit-settlement-without-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SUBMITTED,
+        validatedAt: submittedAt,
+        exportedAt: submittedAt,
+        createdAt: submittedAt,
+      },
+    });
+
+    const lifecycle = new PaymentLifecycleRepository(prismaOne);
+    await expect(
+      lifecycle.settleReservationForPayment('debit-settlement-without-account'),
+    ).rejects.toMatchObject({
+      safeMessage: 'No active CAD funding account exists for merchant',
+    });
+
+    const [payment, reservations, entries, events] = await Promise.all([
+      prismaOne.payment.findUniqueOrThrow({
+        where: { id: 'debit-settlement-without-account' },
+      }),
+      prismaOne.reservation.count({
+        where: { paymentId: 'debit-settlement-without-account' },
+      }),
+      prismaOne.ledgerEntry.count({
+        where: { paymentId: 'debit-settlement-without-account' },
+      }),
+      prismaOne.outboxEvent.count({
+        where: {
+          aggregateId: 'debit-settlement-without-account',
+          aggregateType: 'PAYMENT',
+          eventType: OutboxEventType.PAYMENT_SETTLED,
+        },
+      }),
+    ]);
+
+    expect(payment.status).toBe(PaymentStatus.SUBMITTED);
+    expect(reservations).toBe(0);
+    expect(entries).toBe(0);
+    expect(events).toBe(0);
   });
 
   it('rolls back settlement when the settlement audit entry conflicts', async () => {
@@ -6007,6 +6149,9 @@ describe('Outbox worker (integration)', () => {
     expect(generated).not.toBeNull();
     const settled =
       await lifecycle.settleReservationForPayment('end-to-end-payment');
+    if (!settled) {
+      throw new Error('Expected the credit reservation to settle.');
+    }
     const reconciled = await lifecycle.processBankSettlementEvent({
       bankEventId: 'end-to-end-bank-event',
       paymentId: 'end-to-end-payment',

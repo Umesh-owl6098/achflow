@@ -1184,6 +1184,165 @@ describe('Payments idempotency (integration)', () => {
       ]),
     );
   });
+
+  it('settles a submitted ACH debit exactly once and exposes its funding ledger', async () => {
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_BOTH' },
+    });
+    const fundingAccount = await prisma.fundingAccount.create({
+      data: {
+        merchantId: merchant.id,
+        currency: 'USD',
+        status: FundingAccountStatus.ACTIVE,
+      },
+    });
+    await prisma.ledgerEntry.create({
+      data: {
+        entryKey: 'initial-credit:api-debit-settlement',
+        fundingAccountId: fundingAccount.id,
+        entryType: LedgerEntryType.INITIAL_CREDIT,
+        amount: BigInt(10_000),
+      },
+    });
+    const payment = await prisma.payment.create({
+      data: {
+        id: 'api-debit-settlement-payment',
+        merchantId: merchant.id,
+        idempotencyKey: 'api-debit-settlement-payment-idempotency',
+        requestFingerprint: 'api-debit-settlement-payment-fingerprint',
+        externalReference: 'api-debit-settlement-payment-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'api-debit-settlement-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SUBMITTED,
+        validatedAt: new Date(),
+        exportedAt: new Date(),
+      },
+    });
+
+    const [first, second] = await Promise.all([
+      request(app.getHttpServer())
+        .post(`/api/v1/payments/${payment.id}/settle`)
+        .set('Authorization', bearer(testBothApiKey)),
+      request(app.getHttpServer())
+        .post(`/api/v1/payments/${payment.id}/settle`)
+        .set('Authorization', bearer(testBothApiKey)),
+    ]);
+    const third = await request(app.getHttpServer())
+      .post(`/api/v1/payments/${payment.id}/settle`)
+      .set('Authorization', bearer(testBothApiKey));
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(third.status).toBe(201);
+    expect(first.body).toMatchObject({ id: payment.id, status: 'SETTLED' });
+    expect(second.body).toMatchObject({ id: payment.id, status: 'SETTLED' });
+    expect(third.body).toMatchObject({ id: payment.id, status: 'SETTLED' });
+
+    const details = await request(app.getHttpServer())
+      .get(`/api/v1/payments/${payment.id}`)
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    const [persistedPayment, reservationCount, debitEntries, settledEvents] =
+      await Promise.all([
+        prisma.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+        prisma.reservation.count({ where: { paymentId: payment.id } }),
+        prisma.ledgerEntry.findMany({
+          where: {
+            paymentId: payment.id,
+            entryType: LedgerEntryType.DEBIT_POSTED,
+          },
+        }),
+        prisma.outboxEvent.findMany({
+          where: {
+            aggregateId: payment.id,
+            aggregateType: 'PAYMENT',
+            eventType: OutboxEventType.PAYMENT_SETTLED,
+          },
+        }),
+      ]);
+
+    expect(persistedPayment.status).toBe(PaymentStatus.SETTLED);
+    expect(reservationCount).toBe(0);
+    expect(debitEntries).toEqual([
+      expect.objectContaining({
+        entryKey: `debit-posted:${payment.id}`,
+        fundingAccountId: fundingAccount.id,
+        amount: BigInt(2_500),
+      }),
+    ]);
+    expect(settledEvents).toHaveLength(1);
+    expect(details.body).toMatchObject({
+      status: 'SETTLED',
+      reservation: null,
+      fundingAccount: { id: fundingAccount.id, currency: 'USD' },
+      ledgerSummary: {
+        entries: [
+          expect.objectContaining({
+            entryKey: `debit-posted:${payment.id}`,
+            entryType: 'DEBIT_POSTED',
+            amount: '2500',
+          }),
+        ],
+      },
+    });
+  });
+
+  it('does not partially settle a submitted ACH debit without an active matching funding account', async () => {
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_BOTH' },
+    });
+    const payment = await prisma.payment.create({
+      data: {
+        id: 'api-debit-settlement-without-account',
+        merchantId: merchant.id,
+        idempotencyKey: 'api-debit-settlement-without-account-idempotency',
+        requestFingerprint: 'api-debit-settlement-without-account-fingerprint',
+        externalReference: 'api-debit-settlement-without-account-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'CAD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'api-debit-settlement-without-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SUBMITTED,
+        validatedAt: new Date(),
+        exportedAt: new Date(),
+      },
+    });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/payments/${payment.id}/settle`)
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400)
+      .expect((response) =>
+        expect(response.body).toMatchObject({
+          message: 'No active CAD funding account exists for merchant.',
+        }),
+      );
+
+    const [persistedPayment, reservationCount, ledgerCount, settledEventCount] =
+      await Promise.all([
+        prisma.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+        prisma.reservation.count({ where: { paymentId: payment.id } }),
+        prisma.ledgerEntry.count({ where: { paymentId: payment.id } }),
+        prisma.outboxEvent.count({
+          where: {
+            aggregateId: payment.id,
+            aggregateType: 'PAYMENT',
+            eventType: OutboxEventType.PAYMENT_SETTLED,
+          },
+        }),
+      ]);
+
+    expect(persistedPayment.status).toBe(PaymentStatus.SUBMITTED);
+    expect(reservationCount).toBe(0);
+    expect(ledgerCount).toBe(0);
+    expect(settledEventCount).toBe(0);
+  });
 });
 
 async function waitForSimulatorPayment(

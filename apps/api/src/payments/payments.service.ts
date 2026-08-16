@@ -172,7 +172,10 @@ export class PaymentsService {
 
   async settle(id: string, authenticatedMerchant: AuthenticatedMerchant) {
     await this.findOwnedPayment(id, authenticatedMerchant);
-    return this.serializeReservation(await this.paymentEngine.settle(id));
+    const settlement = await this.paymentEngine.settle(id);
+    return settlement
+      ? this.serializeReservation(settlement)
+      : this.findOne(id, authenticatedMerchant);
   }
 
   async returnSettlement(

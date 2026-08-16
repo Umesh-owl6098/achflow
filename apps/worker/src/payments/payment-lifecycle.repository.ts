@@ -179,7 +179,7 @@ export class PaymentLifecycleRepository {
         where: { paymentId },
       });
       if (!reservation) {
-        throw new OutboxProcessingError('Reservation not found for payment');
+        return this.settleDebitPayment(transaction, paymentId);
       }
       if (reservation.status === ReservationStatus.SETTLED) {
         return reservation;
@@ -228,6 +228,72 @@ export class PaymentLifecycleRepository {
 
       return settled;
     });
+  }
+
+  private async settleDebitPayment(
+    transaction: Prisma.TransactionClient,
+    paymentId: string,
+  ): Promise<null> {
+    const payment = await transaction.payment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        merchantId: true,
+        direction: true,
+        amountCents: true,
+        currency: true,
+        status: true,
+      },
+    });
+    if (!payment) {
+      throw new OutboxProcessingError('Reservation not found for payment');
+    }
+    if (payment.direction !== PaymentDirection.DEBIT) {
+      throw new OutboxProcessingError('Reservation not found for payment');
+    }
+    if (payment.status === PaymentStatus.SETTLED) return null;
+    if (payment.status !== PaymentStatus.SUBMITTED) {
+      throw new OutboxProcessingError(
+        'Payment is not submitted for settlement',
+      );
+    }
+    const account = await transaction.fundingAccount.findUnique({
+      where: {
+        merchantId_currency: {
+          merchantId: payment.merchantId,
+          currency: payment.currency,
+        },
+      },
+    });
+    if (!account || account.status !== FundingAccountStatus.ACTIVE) {
+      throw new OutboxProcessingError(
+        `No active ${payment.currency} funding account exists for merchant`,
+      );
+    }
+    await transaction.payment.update({
+      where: { id: paymentId },
+      data: { status: PaymentStatus.SETTLED },
+    });
+    await transaction.ledgerEntry.create({
+      data: {
+        entryKey: `debit-posted:${paymentId}`,
+        fundingAccountId: account.id,
+        paymentId,
+        entryType: LedgerEntryType.DEBIT_POSTED,
+        amount: payment.amountCents,
+      },
+    });
+    const settledPayment = await transaction.payment.findUniqueOrThrow({
+      where: { id: paymentId },
+    });
+    await transaction.outboxEvent.create({
+      data: paymentLifecycleOutboxEvent(
+        settledPayment,
+        OutboxEventType.PAYMENT_SETTLED,
+        settledPayment.updatedAt,
+      ),
+    });
+    return null;
   }
 
   async returnSettlementForPayment(paymentId: string, returnCode: string) {
