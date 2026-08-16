@@ -338,13 +338,14 @@ export class AdminSimulatorService {
     if (
       dto.scenario.successfulPercent +
         dto.scenario.validationFailurePercent +
+        dto.scenario.duplicatePercent +
         dto.scenario.insufficientFundsPercent +
-        dto.scenario.returnPercent !==
+        dto.scenario.returnPercent +
+        dto.scenario.delayedProcessingPercent +
+        dto.scenario.webhookFailurePercent !==
       100
     ) {
-      throw new BadRequestException(
-        'Success, validation failure, insufficient-funds, and return percentages must total 100.',
-      );
+      throw new BadRequestException('Scenario percentages must total 100.');
     }
     if (dto.scenario.returnPercent > 0) {
       throw new BadRequestException(

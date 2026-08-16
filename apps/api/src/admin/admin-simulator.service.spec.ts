@@ -31,6 +31,30 @@ describe('AdminSimulatorService', () => {
     failureSummary: null,
   };
 
+  const activeSimulatorPrisma = () => ({
+    merchant: {
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: 'merchant-1',
+          merchantCode: 'SIMULATOR',
+          displayName: 'Simulator merchant',
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: 10_000n,
+        },
+      ]),
+    },
+    simulatorRun: {
+      create: jest.fn().mockResolvedValue(run),
+      findUniqueOrThrow: jest
+        .fn()
+        .mockResolvedValueOnce(run)
+        .mockResolvedValue({ ...run, generatedCount: 1 }),
+      update: jest.fn().mockResolvedValue(run),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+  });
+
   afterEach(() => {
     if (originalNodeEnv === undefined) {
       delete process.env.NODE_ENV;
@@ -111,6 +135,79 @@ describe('AdminSimulatorService', () => {
     expect(tpsErrors).not.toHaveLength(0);
   });
 
+  it('accepts scenario percentages totaling 100 including duplicate requests', async () => {
+    process.env.NODE_ENV = 'test';
+    const prisma = activeSimulatorPrisma();
+    const payments = { create: jest.fn().mockResolvedValue({}) };
+    const service = new AdminSimulatorService(
+      prisma as never,
+      payments as never,
+    );
+    const prototype = Object.getPrototypeOf(service) as {
+      sleep(milliseconds: number): Promise<void>;
+    };
+    jest.spyOn(prototype, 'sleep').mockResolvedValue(undefined);
+
+    await expect(
+      service.createRun(
+        simulatorRunDto({
+          successfulPercent: 80,
+          validationFailurePercent: 10,
+          duplicatePercent: 10,
+        }),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ id: run.id }));
+  });
+
+  it.each([
+    [
+      '99',
+      {
+        successfulPercent: 79,
+        validationFailurePercent: 10,
+        duplicatePercent: 10,
+      },
+    ],
+    [
+      '101',
+      {
+        successfulPercent: 81,
+        validationFailurePercent: 10,
+        duplicatePercent: 10,
+      },
+    ],
+  ])('rejects a scenario total of %s', async (_total, scenario) => {
+    process.env.NODE_ENV = 'test';
+    const service = new AdminSimulatorService({} as never, {} as never);
+
+    await expect(service.createRun(simulatorRunDto(scenario))).rejects.toThrow(
+      'Scenario percentages must total 100.',
+    );
+  });
+
+  it.each([
+    'successfulPercent',
+    'validationFailurePercent',
+    'duplicatePercent',
+    'insufficientFundsPercent',
+    'returnPercent',
+    'delayedProcessingPercent',
+    'webhookFailurePercent',
+  ] as const)('includes %s in the scenario total', async (field) => {
+    process.env.NODE_ENV = 'test';
+    const dto = simulatorRunDto();
+    if (field === 'successfulPercent') {
+      dto.scenario.successfulPercent = 99;
+    } else {
+      dto.scenario[field] = 1;
+    }
+    const service = new AdminSimulatorService({} as never, {} as never);
+
+    await expect(service.createRun(dto)).rejects.toThrow(
+      'Scenario percentages must total 100.',
+    );
+  });
+
   it('creates simulator traffic through the existing payment service for active merchants', async () => {
     process.env.NODE_ENV = 'test';
     delete process.env.SIMULATOR_ENABLED;
@@ -176,7 +273,9 @@ describe('AdminSimulatorService', () => {
   });
 });
 
-function simulatorRunDto(): CreateSimulatorRunDto {
+function simulatorRunDto(
+  scenario: Partial<CreateSimulatorRunDto['scenario']> = {},
+): CreateSimulatorRunDto {
   return {
     merchantIds: ['merchant-1'],
     direction: SimulatorDirection.CREDIT,
@@ -194,6 +293,7 @@ function simulatorRunDto(): CreateSimulatorRunDto {
       duplicatePercent: 0,
       delayedProcessingPercent: 0,
       webhookFailurePercent: 0,
+      ...scenario,
     },
   };
 }
