@@ -22,6 +22,15 @@ import {
 } from './dto/create-simulator-run.dto';
 import { ProvisionSimulatorFundingDto } from './dto/provision-simulator-funding.dto';
 
+type SimulatorMerchant = {
+  id: string;
+  merchantCode: string;
+  displayName: string;
+  allowAchDebit: boolean;
+  allowAchCredit: boolean;
+  perPaymentLimit: bigint;
+};
+
 @Injectable()
 export class AdminSimulatorService {
   constructor(
@@ -87,6 +96,7 @@ export class AdminSimulatorService {
         'Every selected merchant must exist and be active.',
       );
     }
+    this.validateSuccessfulAmountRanges(dto, merchants);
     const run = await this.prisma.simulatorRun.create({
       data: {
         configuration: dto as unknown as Prisma.InputJsonValue,
@@ -155,10 +165,14 @@ export class AdminSimulatorService {
 
   async resume(id: string) {
     this.assertSimulatorEnabled();
-    const run = await this.transition(id, SimulatorRunStatus.RUNNING, [
-      SimulatorRunStatus.PAUSED,
-    ]);
-    const config = run.configuration as unknown as CreateSimulatorRunDto;
+    const existingRun = await this.prisma.simulatorRun.findUnique({
+      where: { id },
+    });
+    if (!existingRun) {
+      throw new NotFoundException('Simulator run was not found.');
+    }
+    const config =
+      existingRun.configuration as unknown as CreateSimulatorRunDto;
     const merchants = await this.prisma.merchant.findMany({
       where: { id: { in: config.merchantIds }, status: MerchantStatus.ACTIVE },
       select: {
@@ -170,6 +184,10 @@ export class AdminSimulatorService {
         perPaymentLimit: true,
       },
     });
+    this.validateSuccessfulAmountRanges(config, merchants);
+    const run = await this.transition(id, SimulatorRunStatus.RUNNING, [
+      SimulatorRunStatus.PAUSED,
+    ]);
     void this.execute(id, config, merchants);
     return this.serializeRun(run);
   }
@@ -187,14 +205,7 @@ export class AdminSimulatorService {
   private async execute(
     runId: string,
     dto: CreateSimulatorRunDto,
-    merchants: Array<{
-      id: string;
-      merchantCode: string;
-      displayName: string;
-      allowAchDebit: boolean;
-      allowAchCredit: boolean;
-      perPaymentLimit: bigint;
-    }>,
+    merchants: SimulatorMerchant[],
   ) {
     let latencyTotal = 0;
     try {
@@ -315,10 +326,13 @@ export class AdminSimulatorService {
     index: number,
     validationFailure: boolean,
   ): number {
-    const span = dto.maximumAmountCents - dto.minimumAmountCents + 1;
-    const regular = dto.minimumAmountCents + (index % span);
     if (!validationFailure) {
-      return regular;
+      const maximumAmountCents =
+        merchant.perPaymentLimit < BigInt(dto.maximumAmountCents)
+          ? Number(merchant.perPaymentLimit)
+          : dto.maximumAmountCents;
+      const span = maximumAmountCents - dto.minimumAmountCents + 1;
+      return dto.minimumAmountCents + (index % span);
     }
     const invalid = merchant.perPaymentLimit + BigInt(1);
     if (invalid > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -364,6 +378,22 @@ export class AdminSimulatorService {
       throw new BadRequestException(
         'Delayed processing and webhook failure injection are not available in the simulator.',
       );
+    }
+  }
+
+  private validateSuccessfulAmountRanges(
+    dto: CreateSimulatorRunDto,
+    merchants: SimulatorMerchant[],
+  ) {
+    if (dto.scenario.validationFailurePercent === 100) return;
+
+    const minimumAmountCents = BigInt(dto.minimumAmountCents);
+    for (const merchant of merchants) {
+      if (minimumAmountCents > merchant.perPaymentLimit) {
+        throw new BadRequestException(
+          `No valid successful payment amount exists for merchant ${merchant.merchantCode}.`,
+        );
+      }
     }
   }
 

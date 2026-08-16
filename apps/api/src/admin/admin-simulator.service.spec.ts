@@ -271,7 +271,85 @@ describe('AdminSimulatorService', () => {
       expect.objectContaining({ id: 'merchant-1' }),
     );
   });
+
+  it('keeps successful simulator amounts within the selected merchant limit', () => {
+    const service = new AdminSimulatorService({} as never, {} as never);
+    const amountFor = simulatorAmountFor(service);
+    const dto = simulatorRunDto();
+    dto.minimumAmountCents = 500;
+    dto.maximumAmountCents = 1_000;
+
+    for (const index of [0, 150, 151, 301]) {
+      expect(
+        amountFor(dto, { perPaymentLimit: 650n }, index, false),
+      ).toBeLessThanOrEqual(650);
+    }
+    expect(amountFor(dto, { perPaymentLimit: 650n }, 150, false)).toBe(650);
+    expect(amountFor(dto, { perPaymentLimit: 650n }, 151, false)).toBe(500);
+  });
+
+  it('uses the safe amount range for each merchant limit', () => {
+    const service = new AdminSimulatorService({} as never, {} as never);
+    const amountFor = simulatorAmountFor(service);
+    const dto = simulatorRunDto();
+    dto.minimumAmountCents = 500;
+    dto.maximumAmountCents = 1_000;
+
+    expect(amountFor(dto, { perPaymentLimit: 650n }, 150, false)).toBe(650);
+    expect(amountFor(dto, { perPaymentLimit: 750n }, 250, false)).toBe(750);
+  });
+
+  it('keeps validation-failure amounts above the merchant limit', () => {
+    const service = new AdminSimulatorService({} as never, {} as never);
+    const amountFor = simulatorAmountFor(service);
+
+    expect(
+      amountFor(simulatorRunDto(), { perPaymentLimit: 250n }, 0, true),
+    ).toBe(251);
+  });
+
+  it('rejects an impossible successful amount range before creating a run', async () => {
+    process.env.NODE_ENV = 'test';
+    const prisma = activeSimulatorPrisma();
+    prisma.merchant.findMany.mockResolvedValue([
+      {
+        id: 'merchant-1',
+        merchantCode: 'LOW_LIMIT',
+        displayName: 'Low limit merchant',
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: 250n,
+      },
+    ]);
+    const payments = { create: jest.fn() };
+    const service = new AdminSimulatorService(
+      prisma as never,
+      payments as never,
+    );
+    const dto = simulatorRunDto();
+    dto.minimumAmountCents = 300;
+    dto.maximumAmountCents = 500;
+
+    await expect(service.createRun(dto)).rejects.toThrow(
+      'No valid successful payment amount exists for merchant LOW_LIMIT.',
+    );
+    expect(prisma.simulatorRun.create).not.toHaveBeenCalled();
+    expect(payments.create).not.toHaveBeenCalled();
+  });
 });
+
+function simulatorAmountFor(service: AdminSimulatorService) {
+  return (
+    service as unknown as {
+      amountFor(
+        dto: CreateSimulatorRunDto,
+        merchant: { perPaymentLimit: bigint },
+        index: number,
+        validationFailure: boolean,
+      ): number;
+    }
+  ).amountFor.bind(service);
+}
 
 function simulatorRunDto(
   scenario: Partial<CreateSimulatorRunDto['scenario']> = {},
