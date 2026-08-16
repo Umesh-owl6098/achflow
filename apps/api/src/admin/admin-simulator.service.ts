@@ -30,7 +30,7 @@ export class AdminSimulatorService {
   ) {}
 
   async listRuns() {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     const runs = await this.prisma.simulatorRun.findMany({
       orderBy: { startedAt: 'desc' },
       take: 20,
@@ -39,7 +39,7 @@ export class AdminSimulatorService {
   }
 
   async getRun(id: string) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     const run = await this.prisma.simulatorRun.findUnique({ where: { id } });
     if (!run) throw new NotFoundException('Simulator run was not found.');
     const payments = await this.prisma.payment.findMany({
@@ -66,7 +66,7 @@ export class AdminSimulatorService {
   }
 
   async createRun(dto: CreateSimulatorRunDto) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     this.validate(dto);
     const merchants = await this.prisma.merchant.findMany({
       where: {
@@ -101,7 +101,7 @@ export class AdminSimulatorService {
     merchantId: string,
     dto: ProvisionSimulatorFundingDto,
   ) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     const amount = BigInt(dto.amountCents);
     if (amount <= 0n) {
       throw new BadRequestException('Demo funding amount must be positive.');
@@ -145,7 +145,7 @@ export class AdminSimulatorService {
   }
 
   async pause(id: string) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     return this.serializeRun(
       await this.transition(id, SimulatorRunStatus.PAUSED, [
         SimulatorRunStatus.RUNNING,
@@ -154,7 +154,7 @@ export class AdminSimulatorService {
   }
 
   async resume(id: string) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     const run = await this.transition(id, SimulatorRunStatus.RUNNING, [
       SimulatorRunStatus.PAUSED,
     ]);
@@ -175,7 +175,7 @@ export class AdminSimulatorService {
   }
 
   async stop(id: string) {
-    this.assertLocalDevelopment();
+    this.assertSimulatorEnabled();
     return this.serializeRun(
       await this.transition(id, SimulatorRunStatus.STOPPED, [
         SimulatorRunStatus.RUNNING,
@@ -390,9 +390,13 @@ export class AdminSimulatorService {
     return updated;
   }
 
-  private assertLocalDevelopment() {
+  private assertSimulatorEnabled() {
     const environment = process.env.NODE_ENV ?? 'local';
-    if (!['local', 'development', 'test'].includes(environment)) {
+    const explicitlyEnabled = process.env.SIMULATOR_ENABLED === 'true';
+    if (
+      !explicitlyEnabled &&
+      !['local', 'development', 'test'].includes(environment)
+    ) {
       throw new NotFoundException('Simulator is unavailable.');
     }
   }
