@@ -18,6 +18,7 @@ import { MerchantsRepository } from './merchants.repository';
 import { PaymentEngineService } from './payment-engine.service';
 import { AuthenticatedMerchant } from '../auth/merchant-authentication.service';
 import { ListPaymentsQueryDto } from './dto/list-payments-query.dto';
+import { ListAdminPaymentsQueryDto } from './dto/list-admin-payments-query.dto';
 import { serializePaymentListItem } from './payment-list.mapper';
 import { Prisma } from '@prisma/client';
 
@@ -109,6 +110,14 @@ export class PaymentsService {
     query: ListPaymentsQueryDto,
     authenticatedMerchant: AuthenticatedMerchant,
   ) {
+    return this.listForScope(query, authenticatedMerchant.id);
+  }
+
+  async listAdmin(query: ListAdminPaymentsQueryDto) {
+    return this.listForScope(query, query.merchantId);
+  }
+
+  private async listForScope(query: ListPaymentsQueryDto, merchantId?: string) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 25;
     const { start, end } = paymentDateRange(query);
@@ -142,13 +151,20 @@ export class PaymentsService {
     };
     const sortBy = query.sortBy ?? 'createdAt';
     const sortOrder = query.sortOrder ?? 'desc';
-    const [payments, total] = await this.paymentsRepository.listForMerchant({
-      merchantId: authenticatedMerchant.id,
-      where,
-      orderBy: { [sortBy]: sortOrder },
-      skip: (page - 1) * limit,
-      take: limit,
-    });
+    const [payments, total] = merchantId
+      ? await this.paymentsRepository.listForMerchant({
+          merchantId,
+          where,
+          orderBy: { [sortBy]: sortOrder },
+          skip: (page - 1) * limit,
+          take: limit,
+        })
+      : await this.paymentsRepository.listForAdmin({
+          where,
+          orderBy: { [sortBy]: sortOrder },
+          skip: (page - 1) * limit,
+          take: limit,
+        });
 
     return {
       data: payments.map(serializePaymentListItem),

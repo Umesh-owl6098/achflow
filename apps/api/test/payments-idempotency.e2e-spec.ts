@@ -352,6 +352,65 @@ describe('Payments idempotency (integration)', () => {
       .get('/api/v1/admin/payments/admin-merchant-two-payment')
       .set('Authorization', bearer(testBothApiKey))
       .expect(403);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments')
+      .expect(401);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments')
+      .set('Authorization', bearer('invalid-admin-api-key'))
+      .expect(403);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(403);
+
+    const adminList = await request(app.getHttpServer())
+      .get('/api/v1/admin/payments')
+      .query({ page: 1, limit: 25, sortBy: 'createdAt', sortOrder: 'asc' })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    const adminListBody = adminList.body as PaymentListResponse;
+    expect(adminListBody).toMatchObject({
+      page: 1,
+      limit: 25,
+      total: 2,
+      totalPages: 1,
+    });
+    expect(adminListBody.data).toHaveLength(2);
+    expect(adminListBody.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'admin-merchant-one-payment',
+          merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
+        }),
+        expect.objectContaining({
+          id: 'admin-merchant-two-payment',
+          merchant: {
+            merchantCode: 'TEST_CREDIT',
+            displayName: 'Test Credit',
+          },
+        }),
+      ]),
+    );
+    const filteredAdminList = await request(app.getHttpServer())
+      .get('/api/v1/admin/payments')
+      .query({ merchantId: merchantTwo.id, page: 1, limit: 25 })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((filteredAdminList.body as PaymentListResponse).data).toEqual([
+      expect.objectContaining({
+        id: 'admin-merchant-two-payment',
+        merchant: { merchantCode: 'TEST_CREDIT', displayName: 'Test Credit' },
+      }),
+    ]);
+    const merchantList = await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ page: 1, limit: 25 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    expect((merchantList.body as PaymentListResponse).data).toEqual([
+      expect.objectContaining({ id: 'admin-merchant-one-payment' }),
+    ]);
 
     const adminPaymentOne = await request(app.getHttpServer())
       .get('/api/v1/admin/payments/admin-merchant-one-payment')

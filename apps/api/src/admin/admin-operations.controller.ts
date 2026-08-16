@@ -6,6 +6,7 @@ import { LedgerService } from '../ledger/ledger.service';
 import { ListNachaFilesQueryDto } from '../nacha-files/dto/list-nacha-files-query.dto';
 import { NachaFilesService } from '../nacha-files/nacha-files.service';
 import { PaymentsService } from '../payments/payments.service';
+import { ListAdminPaymentsQueryDto } from '../payments/dto/list-admin-payments-query.dto';
 import { AdminApiKeyGuard } from './admin-api-key.guard';
 
 @Controller('api/v1/admin')
@@ -42,6 +43,11 @@ export class AdminOperationsController {
       `attachment; filename="${file.fileName}"`,
     );
     response.send(file.contents);
+  }
+
+  @Get('payments')
+  getPayments(@Query() query: ListAdminPaymentsQueryDto) {
+    return this.payments.listAdmin(query);
   }
 
   @Get('payments/:paymentId')

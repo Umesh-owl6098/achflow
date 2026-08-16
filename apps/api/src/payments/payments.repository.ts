@@ -135,9 +135,42 @@ export class PaymentsRepository {
     take: number;
   }) {
     const scopedWhere: Prisma.PaymentWhereInput = { merchantId, ...where };
+    return this.listForScope({
+      where: scopedWhere,
+      orderBy,
+      skip,
+      take,
+    });
+  }
+
+  listForAdmin({
+    where,
+    orderBy,
+    skip,
+    take,
+  }: {
+    where: Prisma.PaymentWhereInput;
+    orderBy: Prisma.PaymentOrderByWithRelationInput;
+    skip: number;
+    take: number;
+  }) {
+    return this.listForScope({ where, orderBy, skip, take });
+  }
+
+  private listForScope({
+    where,
+    orderBy,
+    skip,
+    take,
+  }: {
+    where: Prisma.PaymentWhereInput;
+    orderBy: Prisma.PaymentOrderByWithRelationInput;
+    skip: number;
+    take: number;
+  }) {
     return this.prisma.$transaction([
       this.prisma.payment.findMany({
-        where: scopedWhere,
+        where,
         include: {
           merchant: { select: { merchantCode: true, displayName: true } },
         },
@@ -145,7 +178,7 @@ export class PaymentsRepository {
         skip,
         take,
       }),
-      this.prisma.payment.count({ where: scopedWhere }),
+      this.prisma.payment.count({ where }),
     ]);
   }
 

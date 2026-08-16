@@ -2,16 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { serverApiBaseUrl as apiBaseUrl } from "@/lib/server-api-base-url";
 
 export async function GET(request: NextRequest) {
-  const apiKey = process.env.ACHFLOW_API_KEY;
+  const apiKey = process.env.ACHFLOW_ADMIN_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { message: "Payment API access is not configured." },
+      { message: "Admin payment API access is not configured." },
       { status: 500 },
     );
   }
   try {
     const response = await fetch(
-      `${apiBaseUrl.replace(/\/$/, "")}/payments?${request.nextUrl.searchParams.toString()}`,
+      `${apiBaseUrl.replace(/\/$/, "")}/admin/payments?${request.nextUrl.searchParams.toString()}`,
       {
         headers: {
           Authorization: `Bearer ${apiKey}`,
