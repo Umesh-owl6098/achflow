@@ -142,8 +142,11 @@ export function SimulatorManager() {
   const scenarioTotal =
     form.successfulPercent +
     form.validationFailurePercent +
+    form.duplicatePercent +
     form.insufficientFundsPercent +
-    form.returnPercent;
+    form.returnPercent +
+    form.delayedProcessingPercent +
+    form.webhookFailurePercent;
   const configValid =
     form.merchantIds.length > 0 &&
     form.minimumAmountCents <= form.maximumAmountCents &&

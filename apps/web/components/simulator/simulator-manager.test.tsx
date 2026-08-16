@@ -67,5 +67,33 @@ describe("SimulatorManager", () => {
     expect(
       screen.getByRole("button", { name: "Complete configuration to start" }),
     ).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Successful %"), {
+      target: { value: "100" },
+    });
+    expect(screen.getByRole("button", { name: /Start run/ })).toBeEnabled();
+
+    for (const label of [
+      "Validation failure %",
+      "Duplicate retry %",
+      "Return % (unavailable)",
+      "Insufficient funds % (unavailable)",
+      "Delayed processing % (unavailable)",
+      "Webhook failures % (unavailable)",
+    ]) {
+      fireEvent.change(screen.getByLabelText(label), {
+        target: { value: "1" },
+      });
+      expect(screen.getByText(/Outcome total: 101%/)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", {
+          name: "Complete configuration to start",
+        }),
+      ).toBeDisabled();
+      fireEvent.change(screen.getByLabelText(label), {
+        target: { value: "0" },
+      });
+      expect(screen.getByText(/Outcome total: 100%/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Start run/ })).toBeEnabled();
+    }
   });
 });
