@@ -2,16 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { serverApiBaseUrl as base } from "@/lib/server-api-base-url";
 
 export async function GET(request: NextRequest) {
-  const key = process.env.ACHFLOW_API_KEY;
+  const key = process.env.ACHFLOW_ADMIN_API_KEY;
   if (!key) {
     return NextResponse.json(
-      { message: "Webhook API access is not configured." },
+      { message: "Webhook operations access is not configured." },
       { status: 500 },
     );
   }
   try {
     const response = await fetch(
-      `${base.replace(/\/$/, "")}/webhooks/deliveries${request.nextUrl.search}`,
+      `${base.replace(/\/$/, "")}/admin/webhooks/deliveries${request.nextUrl.search}`,
       {
         headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
         cache: "no-store",

@@ -7,6 +7,10 @@ import { ListNachaFilesQueryDto } from '../nacha-files/dto/list-nacha-files-quer
 import { NachaFilesService } from '../nacha-files/nacha-files.service';
 import { PaymentsService } from '../payments/payments.service';
 import { ListAdminPaymentsQueryDto } from '../payments/dto/list-admin-payments-query.dto';
+import { ListAdminWebhookDeliveriesQueryDto } from '../webhooks/dto/list-admin-webhook-deliveries-query.dto';
+import { ListAdminWebhooksQueryDto } from '../webhooks/dto/list-admin-webhooks-query.dto';
+import { ListWebhookDeliveriesQueryDto } from '../webhooks/dto/list-webhook-deliveries-query.dto';
+import { MerchantWebhookEndpointsService } from '../webhooks/merchant-webhook-endpoints.service';
 import { AdminApiKeyGuard } from './admin-api-key.guard';
 
 @Controller('api/v1/admin')
@@ -17,6 +21,7 @@ export class AdminOperationsController {
     private readonly ledger: LedgerService,
     private readonly nachaFiles: NachaFilesService,
     private readonly payments: PaymentsService,
+    private readonly webhooks: MerchantWebhookEndpointsService,
   ) {}
 
   @Get('dashboard')
@@ -53,5 +58,23 @@ export class AdminOperationsController {
   @Get('payments/:paymentId')
   getPayment(@Param('paymentId') paymentId: string) {
     return this.payments.detailsAdmin(paymentId);
+  }
+
+  @Get('webhooks')
+  getWebhooks(@Query() query: ListAdminWebhooksQueryDto) {
+    return this.webhooks.listAdmin(query);
+  }
+
+  @Get('webhooks/deliveries')
+  getWebhookDeliveries(@Query() query: ListAdminWebhookDeliveriesQueryDto) {
+    return this.webhooks.listDeliveriesAdmin(query);
+  }
+
+  @Get('webhooks/:endpointId/deliveries')
+  getEndpointWebhookDeliveries(
+    @Param('endpointId') endpointId: string,
+    @Query() query: ListWebhookDeliveriesQueryDto,
+  ) {
+    return this.webhooks.deliveriesAdmin(endpointId, query);
   }
 }

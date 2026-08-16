@@ -4,16 +4,16 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ endpointId: string }> },
 ) {
-  const key = process.env.ACHFLOW_API_KEY;
+  const key = process.env.ACHFLOW_ADMIN_API_KEY;
   if (!key)
     return NextResponse.json(
-      { message: "Webhook API access is not configured." },
+      { message: "Webhook operations access is not configured." },
       { status: 500 },
     );
   try {
     const endpointId = (await context.params).endpointId;
     const response = await fetch(
-      `${base.replace(/\/$/, "")}/webhooks/${encodeURIComponent(endpointId)}/deliveries${request.nextUrl.search}`,
+      `${base.replace(/\/$/, "")}/admin/webhooks/${encodeURIComponent(endpointId)}/deliveries${request.nextUrl.search}`,
       {
         headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
         cache: "no-store",

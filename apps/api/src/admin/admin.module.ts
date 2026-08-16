@@ -5,6 +5,7 @@ import { DashboardModule } from '../dashboard/dashboard.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { NachaFilesModule } from '../nacha-files/nacha-files.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AdminApiKeyGuard } from './admin-api-key.guard';
 import { AdminMerchantsController } from './admin-merchants.controller';
 import { AdminMerchantsService } from './admin-merchants.service';
@@ -21,6 +22,7 @@ import { AdminOperationsController } from './admin-operations.controller';
     DashboardModule,
     LedgerModule,
     NachaFilesModule,
+    WebhooksModule,
   ],
   controllers: [
     AdminMerchantsController,

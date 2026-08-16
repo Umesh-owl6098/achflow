@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverApiBaseUrl as base } from "@/lib/server-api-base-url";
 
-async function forward(request: NextRequest) {
+async function forwardMerchantWrite(request: NextRequest) {
   const key = process.env.ACHFLOW_API_KEY;
   if (!key)
     return NextResponse.json(
@@ -28,8 +28,24 @@ async function forward(request: NextRequest) {
   return NextResponse.json(body, { status: response.status });
 }
 export async function GET(request: NextRequest) {
+  const key = process.env.ACHFLOW_ADMIN_API_KEY;
+  if (!key)
+    return NextResponse.json(
+      { message: "Webhook operations access is not configured." },
+      { status: 500 },
+    );
   try {
-    return await forward(request);
+    const response = await fetch(
+      `${base.replace(/\/$/, "")}/admin/webhooks${request.nextUrl.search}`,
+      {
+        headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    return NextResponse.json(await response.json().catch(() => null), {
+      status: response.status,
+    });
   } catch {
     return NextResponse.json(
       { message: "Webhook data is unavailable." },
@@ -39,7 +55,7 @@ export async function GET(request: NextRequest) {
 }
 export async function POST(request: NextRequest) {
   try {
-    return await forward(request);
+    return await forwardMerchantWrite(request);
   } catch {
     return NextResponse.json(
       { message: "Webhook request failed." },

@@ -5,6 +5,7 @@ import {
   OutboxEventType,
   PaymentDirection,
   PaymentStatus,
+  WebhookDeliveryStatus,
 } from '@prisma/client';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -77,6 +78,22 @@ type LedgerResponse = {
 type AdminDashboardResponse = {
   summary: { paymentsToday: number };
 };
+
+type WebhookEndpointsResponse = {
+  data: Array<{
+    id: string;
+    merchant?: { id: string; merchantCode: string; displayName: string };
+  }>;
+};
+
+type WebhookDeliveriesResponse = {
+  data: Array<{
+    eventId: string;
+    merchant: { merchantCode: string; displayName: string };
+  }>;
+};
+
+type WebhookEndpointResponse = { id: string };
 
 describe('Payments idempotency (integration)', () => {
   let app: INestApplication<App>;
@@ -467,6 +484,173 @@ describe('Payments idempotency (integration)', () => {
     const ledgerBody = ledger.body as unknown as LedgerResponse;
     expect(ledgerBody.data).toHaveLength(1);
     expect(ledgerBody.data[0]?.payment?.id).toBe('admin-merchant-two-payment');
+  });
+
+  it('keeps merchant webhook reads isolated while admin operations reads aggregate and filter merchants', async () => {
+    const [merchantOne, merchantTwo] = await prisma.merchant.findMany({
+      where: { merchantCode: { in: ['TEST_BOTH', 'TEST_CREDIT'] } },
+      orderBy: { merchantCode: 'asc' },
+    });
+    const endpointOne = await webhookEndpoints.create(
+      merchantOne.id,
+      'http://127.0.0.1:4011/merchant-one',
+      'merchant-one-webhook-secret',
+    );
+    const endpointTwo = await webhookEndpoints.create(
+      merchantTwo.id,
+      'http://127.0.0.1:4012/merchant-two',
+      'merchant-two-webhook-secret',
+    );
+    const [outboxOne, outboxTwo] = await Promise.all([
+      prisma.outboxEvent.create({
+        data: {
+          eventKey: 'admin-webhook-merchant-one-event',
+          eventType: OutboxEventType.PAYMENT_VALIDATED,
+          aggregateType: 'PAYMENT',
+          aggregateId: 'admin-webhook-payment-one',
+          payload: { paymentId: 'admin-webhook-payment-one' },
+        },
+      }),
+      prisma.outboxEvent.create({
+        data: {
+          eventKey: 'admin-webhook-merchant-two-event',
+          eventType: OutboxEventType.PAYMENT_RETURNED,
+          aggregateType: 'PAYMENT',
+          aggregateId: 'admin-webhook-payment-two',
+          payload: { paymentId: 'admin-webhook-payment-two' },
+        },
+      }),
+    ]);
+    await prisma.webhookDelivery.createMany({
+      data: [
+        {
+          merchantId: merchantOne.id,
+          webhookEndpointId: endpointOne.id,
+          outboxEventId: outboxOne.id,
+          eventId: 'admin-webhook-delivery-one',
+          eventType: 'payment.validated',
+          payload: { data: { paymentId: 'admin-webhook-payment-one' } },
+          status: WebhookDeliveryStatus.DELIVERED,
+          deliveredAt: new Date('2026-08-16T00:00:00.000Z'),
+        },
+        {
+          merchantId: merchantTwo.id,
+          webhookEndpointId: endpointTwo.id,
+          outboxEventId: outboxTwo.id,
+          eventId: 'admin-webhook-delivery-two',
+          eventType: 'payment.returned',
+          payload: { data: { paymentId: 'admin-webhook-payment-two' } },
+          status: WebhookDeliveryStatus.FAILED,
+          lastErrorCode: 'WEBHOOK_HTTP_500',
+        },
+      ],
+    });
+
+    const merchantEndpoints = await request(app.getHttpServer())
+      .get('/api/v1/webhooks')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    expect((merchantEndpoints.body as WebhookEndpointsResponse).data).toEqual([
+      expect.objectContaining({ id: endpointOne.id }),
+    ]);
+    const merchantDeliveries = await request(app.getHttpServer())
+      .get('/api/v1/webhooks/deliveries')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    expect((merchantDeliveries.body as WebhookDeliveriesResponse).data).toEqual(
+      [expect.objectContaining({ eventId: 'admin-webhook-delivery-one' })],
+    );
+
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks')
+      .expect(401);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks')
+      .set('Authorization', bearer('invalid-admin-api-key'))
+      .expect(403);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(403);
+
+    const adminEndpoints = await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((adminEndpoints.body as WebhookEndpointsResponse).data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: endpointOne.id,
+          merchant: {
+            id: merchantOne.id,
+            merchantCode: 'TEST_BOTH',
+            displayName: 'Test Both',
+          },
+        }),
+        expect.objectContaining({
+          id: endpointTwo.id,
+          merchant: {
+            id: merchantTwo.id,
+            merchantCode: 'TEST_CREDIT',
+            displayName: 'Test Credit',
+          },
+        }),
+      ]),
+    );
+    const filteredEndpoints = await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks')
+      .query({ merchantId: merchantTwo.id })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((filteredEndpoints.body as WebhookEndpointsResponse).data).toEqual([
+      expect.objectContaining({ id: endpointTwo.id }),
+    ]);
+
+    const adminDeliveries = await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks/deliveries')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((adminDeliveries.body as WebhookDeliveriesResponse).data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventId: 'admin-webhook-delivery-one',
+          merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
+        }),
+        expect.objectContaining({
+          eventId: 'admin-webhook-delivery-two',
+          merchant: { merchantCode: 'TEST_CREDIT', displayName: 'Test Credit' },
+        }),
+      ]),
+    );
+    const filteredDeliveries = await request(app.getHttpServer())
+      .get('/api/v1/admin/webhooks/deliveries')
+      .query({ merchantId: merchantTwo.id })
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((filteredDeliveries.body as WebhookDeliveriesResponse).data).toEqual(
+      [expect.objectContaining({ eventId: 'admin-webhook-delivery-two' })],
+    );
+    const endpointDeliveries = await request(app.getHttpServer())
+      .get(`/api/v1/admin/webhooks/${endpointTwo.id}/deliveries`)
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect((endpointDeliveries.body as WebhookDeliveriesResponse).data).toEqual(
+      [expect.objectContaining({ eventId: 'admin-webhook-delivery-two' })],
+    );
+
+    const merchantWrite = await request(app.getHttpServer())
+      .post('/api/v1/webhooks')
+      .set('Authorization', bearer(testBothApiKey))
+      .send({
+        url: 'http://127.0.0.1:4013/merchant-one-write',
+        signingSecret: 'merchant-write-webhook-secret',
+      })
+      .expect(201);
+    expect(
+      await prisma.merchantWebhookEndpoint.findUniqueOrThrow({
+        where: { id: (merchantWrite.body as WebhookEndpointResponse).id },
+      }),
+    ).toMatchObject({ merchantId: merchantOne.id });
   });
 
   it('creates a simulator payment for an active non-default merchant', async () => {

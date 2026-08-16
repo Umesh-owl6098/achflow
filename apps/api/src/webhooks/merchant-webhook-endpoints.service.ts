@@ -7,6 +7,8 @@ import { OutboxEventType } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import type { AuthenticatedMerchant } from '../auth/merchant-authentication.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ListAdminWebhookDeliveriesQueryDto } from './dto/list-admin-webhook-deliveries-query.dto';
+import { ListAdminWebhooksQueryDto } from './dto/list-admin-webhooks-query.dto';
 import { ListWebhookDeliveriesQueryDto } from './dto/list-webhook-deliveries-query.dto';
 import { ListWebhooksQueryDto } from './dto/list-webhooks-query.dto';
 import { UpdateWebhookEndpointDto } from './dto/update-webhook-endpoint.dto';
@@ -34,19 +36,38 @@ export class MerchantWebhookEndpointsService {
     });
   }
   async list(query: ListWebhooksQueryDto, merchant: AuthenticatedMerchant) {
+    return this.listForMerchantScope(query, merchant.id, false);
+  }
+
+  async listAdmin(query: ListAdminWebhooksQueryDto) {
+    return this.listForMerchantScope(query, query.merchantId, true);
+  }
+
+  private async listForMerchantScope(
+    query: ListWebhooksQueryDto,
+    merchantId: string | undefined,
+    includeMerchant = false,
+  ) {
     const endpoints = await this.prisma.merchantWebhookEndpoint.findMany({
       where: {
-        merchantId: merchant.id,
+        ...(merchantId ? { merchantId } : {}),
         ...(query.status === 'active' ? { isActive: true } : {}),
         ...(query.status === 'disabled' ? { isActive: false } : {}),
         ...(query.search?.trim()
           ? { url: { contains: query.search.trim(), mode: 'insensitive' } }
           : {}),
       },
-      include: { deliveries: { orderBy: { createdAt: 'desc' } } },
+      include: {
+        deliveries: { orderBy: { createdAt: 'desc' } },
+        merchant: {
+          select: { id: true, merchantCode: true, displayName: true },
+        },
+      },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
-    const data = endpoints.map((endpoint) => this.endpointView(endpoint));
+    const data = endpoints.map((endpoint) =>
+      this.endpointView(endpoint, includeMerchant),
+    );
     return {
       data:
         query.deliveryStatus && query.deliveryStatus !== 'all'
@@ -126,9 +147,28 @@ export class MerchantWebhookEndpointsService {
     merchant: AuthenticatedMerchant,
   ) {
     const endpoint = await this.scopedEndpoint(endpointId, merchant.id);
+    return this.deliveriesForEndpoint(endpoint.id, query);
+  }
+
+  async deliveriesAdmin(
+    endpointId: string,
+    query: ListWebhookDeliveriesQueryDto,
+  ) {
+    const endpoint = await this.prisma.merchantWebhookEndpoint.findUnique({
+      where: { id: endpointId },
+    });
+    if (!endpoint)
+      throw new NotFoundException('Webhook endpoint was not found.');
+    return this.deliveriesForEndpoint(endpoint.id, query);
+  }
+
+  private async deliveriesForEndpoint(
+    endpointId: string,
+    query: ListWebhookDeliveriesQueryDto,
+  ) {
     const data = await this.prisma.webhookDelivery.findMany({
       where: {
-        webhookEndpointId: endpoint.id,
+        webhookEndpointId: endpointId,
         ...(query.status && query.status !== 'all'
           ? { status: query.status }
           : {}),
@@ -165,10 +205,21 @@ export class MerchantWebhookEndpointsService {
     query: ListWebhookDeliveriesQueryDto,
     merchant: AuthenticatedMerchant,
   ) {
+    return this.listDeliveriesForMerchantScope(query, merchant.id);
+  }
+
+  async listDeliveriesAdmin(query: ListAdminWebhookDeliveriesQueryDto) {
+    return this.listDeliveriesForMerchantScope(query, query.merchantId);
+  }
+
+  private async listDeliveriesForMerchantScope(
+    query: ListWebhookDeliveriesQueryDto,
+    merchantId?: string,
+  ) {
     const start = deliveryStart(query.dateRange);
     const deliveries = await this.prisma.webhookDelivery.findMany({
       where: {
-        merchantId: merchant.id,
+        ...(merchantId ? { merchantId } : {}),
         ...(query.status && query.status !== 'all'
           ? { status: query.status }
           : {}),
@@ -269,30 +320,37 @@ export class MerchantWebhookEndpointsService {
     return endpoint;
   }
 
-  private endpointView(endpoint: {
-    id: string;
-    url: string;
-    isActive: boolean;
-    createdAt: Date;
-    updatedAt: Date;
-    deliveries: Array<{
+  private endpointView(
+    endpoint: {
       id: string;
-      status: string;
-      attemptCount: number;
-      responseStatus: number | null;
-      lastErrorCode: string | null;
-      nextAttemptAt: Date | null;
-      deliveredAt: Date | null;
+      url: string;
+      isActive: boolean;
       createdAt: Date;
-      eventType: string;
-    }>;
-  }) {
+      updatedAt: Date;
+      deliveries: Array<{
+        id: string;
+        status: string;
+        attemptCount: number;
+        responseStatus: number | null;
+        lastErrorCode: string | null;
+        nextAttemptAt: Date | null;
+        deliveredAt: Date | null;
+        createdAt: Date;
+        eventType: string;
+      }>;
+      merchant?: { id: string; merchantCode: string; displayName: string };
+    },
+    includeMerchant = false,
+  ) {
     return {
       id: endpoint.id,
       url: endpoint.url,
       isActive: endpoint.isActive,
       createdAt: endpoint.createdAt.toISOString(),
       updatedAt: endpoint.updatedAt.toISOString(),
+      ...(includeMerchant && endpoint.merchant
+        ? { merchant: endpoint.merchant }
+        : {}),
       deliveries: endpoint.deliveries.map((delivery) => ({
         ...delivery,
         createdAt: delivery.createdAt.toISOString(),
