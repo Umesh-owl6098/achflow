@@ -341,6 +341,51 @@ describe('Payments idempotency (integration)', () => {
       .get('/api/v1/payments/admin-merchant-two-payment')
       .set('Authorization', bearer(testBothApiKey))
       .expect(404);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments/admin-merchant-one-payment')
+      .expect(401);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments/admin-merchant-one-payment')
+      .set('Authorization', bearer('invalid-admin-api-key'))
+      .expect(403);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/payments/admin-merchant-two-payment')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(403);
+
+    const adminPaymentOne = await request(app.getHttpServer())
+      .get('/api/v1/admin/payments/admin-merchant-one-payment')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect(adminPaymentOne.body).toMatchObject({
+      id: 'admin-merchant-one-payment',
+      merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
+      payment: {
+        id: 'admin-merchant-one-payment',
+        merchant: { merchantCode: 'TEST_BOTH', displayName: 'Test Both' },
+      },
+      reservation: null,
+      ledgerSummary: {
+        entries: [],
+        postedBalance: '0',
+        activeReservedAmount: '0',
+        availableBalance: '0',
+      },
+      outboxEvents: [],
+    });
+    const adminPaymentTwo = await request(app.getHttpServer())
+      .get('/api/v1/admin/payments/admin-merchant-two-payment')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+    expect(adminPaymentTwo.body).toMatchObject({
+      id: 'admin-merchant-two-payment',
+      merchant: { merchantCode: 'TEST_CREDIT', displayName: 'Test Credit' },
+      payment: {
+        id: 'admin-merchant-two-payment',
+        merchant: { merchantCode: 'TEST_CREDIT', displayName: 'Test Credit' },
+      },
+    });
+
     const allDashboard = await request(app.getHttpServer())
       .get('/api/v1/admin/dashboard')
       .set('Authorization', bearer(adminApiKey))

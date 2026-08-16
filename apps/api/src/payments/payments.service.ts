@@ -188,6 +188,14 @@ export class PaymentsService {
 
   async details(id: string, authenticatedMerchant: AuthenticatedMerchant) {
     await this.findOwnedPayment(id, authenticatedMerchant);
+    return this.operationalDetails(id);
+  }
+
+  async detailsAdmin(id: string) {
+    return this.operationalDetails(id);
+  }
+
+  private async operationalDetails(id: string) {
     const details = await this.paymentEngine.details(id);
     const payment = serializePayment(details.payment);
     return {

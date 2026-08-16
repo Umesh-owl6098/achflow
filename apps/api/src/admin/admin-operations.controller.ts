@@ -5,6 +5,7 @@ import { ListLedgerQueryDto } from '../ledger/dto/list-ledger-query.dto';
 import { LedgerService } from '../ledger/ledger.service';
 import { ListNachaFilesQueryDto } from '../nacha-files/dto/list-nacha-files-query.dto';
 import { NachaFilesService } from '../nacha-files/nacha-files.service';
+import { PaymentsService } from '../payments/payments.service';
 import { AdminApiKeyGuard } from './admin-api-key.guard';
 
 @Controller('api/v1/admin')
@@ -14,6 +15,7 @@ export class AdminOperationsController {
     private readonly dashboard: DashboardService,
     private readonly ledger: LedgerService,
     private readonly nachaFiles: NachaFilesService,
+    private readonly payments: PaymentsService,
   ) {}
 
   @Get('dashboard')
@@ -40,5 +42,10 @@ export class AdminOperationsController {
       `attachment; filename="${file.fileName}"`,
     );
     response.send(file.contents);
+  }
+
+  @Get('payments/:paymentId')
+  getPayment(@Param('paymentId') paymentId: string) {
+    return this.payments.detailsAdmin(paymentId);
   }
 }
