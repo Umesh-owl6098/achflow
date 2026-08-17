@@ -1,5 +1,5 @@
 "use client";
-import { FormEvent, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Plus, Power, Search, Send, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   LoadingState,
 } from "@/components/foundation/states";
 import { PageHeader } from "@/components/foundation/page-header";
+import { ConfirmationDialog } from "@/components/foundation/confirmation-dialog";
 import { StatusBadge } from "@/components/foundation/status-badge";
 import {
   deliveryTone,
@@ -42,6 +43,14 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
   const [status, setStatus] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [selected, setSelected] = useState<WebhookEndpoint | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [archivedEndpointIds, setArchivedEndpointIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [deletingEndpointId, setDeletingEndpointId] = useState<string | null>(
+    null,
+  );
+  const deleteInFlight = useRef(new Set<string>());
   const client = useQueryClient();
   const query = useQuery({
     queryKey: ["webhooks", search, status],
@@ -52,6 +61,43 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
   });
   const refresh = () =>
     void client.invalidateQueries({ queryKey: ["webhooks"] });
+  const removeEndpoint = async (endpoint: WebhookEndpoint) => {
+    if (deleteInFlight.current.has(endpoint.id)) return;
+    deleteInFlight.current.add(endpoint.id);
+    setDeletingEndpointId(endpoint.id);
+    setNotice(null);
+    try {
+      const result = (await api(`/api/webhooks/${endpoint.id}`, {
+        method: "DELETE",
+      })) as DeleteWebhookEndpointResult;
+      if (result.deleted) {
+        setArchivedEndpointIds((current) => {
+          const next = new Set(current);
+          next.delete(endpoint.id);
+          return next;
+        });
+        setNotice("Webhook endpoint deleted.");
+        if (selected?.id === endpoint.id) setSelected(null);
+      } else if (result.disabled) {
+        setArchivedEndpointIds((current) => new Set(current).add(endpoint.id));
+        setNotice(
+          "Webhook endpoint has delivery history, so it was disabled instead of deleted.",
+        );
+      } else {
+        throw new Error("Webhook endpoint removal returned an invalid result.");
+      }
+      await client.invalidateQueries({ queryKey: ["webhooks"] });
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Webhook endpoint could not be removed.",
+      );
+    } finally {
+      deleteInFlight.current.delete(endpoint.id);
+      setDeletingEndpointId(null);
+    }
+  };
   if (query.isLoading)
     return <LoadingState label="Loading webhook endpoints" />;
   if (query.isError)
@@ -119,6 +165,14 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
           <option value="disabled">Disabled</option>
         </select>
       </section>
+      {notice ? (
+        <p
+          role="status"
+          className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+        >
+          {notice}
+        </p>
+      ) : null}
       {data.data.length === 0 ? (
         <EmptyState
           title="No webhook endpoints"
@@ -154,7 +208,11 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
                     <StatusBadge
                       tone={endpoint.isActive ? "success" : "neutral"}
                     >
-                      {endpoint.isActive ? "ACTIVE" : "DISABLED"}
+                      {archivedEndpointIds.has(endpoint.id)
+                        ? "ARCHIVED"
+                        : endpoint.isActive
+                          ? "ACTIVE"
+                          : "DISABLED"}
                     </StatusBadge>
                   </td>
                   <td>{endpoint.deliveries.length}</td>
@@ -205,18 +263,23 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
                       >
                         <Power className="h-4 w-4" />
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          void api(`/api/webhooks/${endpoint.id}`, {
-                            method: "DELETE",
-                          }).then(refresh)
+                      <ConfirmationDialog
+                        trigger={
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-label={`Remove ${endpoint.url}`}
+                            title="Remove endpoint"
+                            disabled={deletingEndpointId === endpoint.id}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         }
-                        aria-label={`Delete ${endpoint.url}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                        title="Remove webhook endpoint"
+                        description="Remove this webhook endpoint? Endpoints with delivery history are retained and disabled for audit purposes."
+                        confirmLabel="Remove endpoint"
+                        onConfirm={() => void removeEndpoint(endpoint)}
+                      />
                     </div>
                   </td>
                 </tr>
@@ -241,6 +304,11 @@ export function WebhooksManager({ embedded = false }: { embedded?: boolean }) {
     </div>
   );
 }
+
+type DeleteWebhookEndpointResult = {
+  deleted: boolean;
+  disabled: boolean;
+};
 function Card({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
