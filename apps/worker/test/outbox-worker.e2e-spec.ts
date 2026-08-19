@@ -63,6 +63,7 @@ describe('Outbox worker (integration)', () => {
       repositoryOne,
       new OutboxHandler(
         new PaymentValidationService(new PaymentLifecycleRepository(prismaOne)),
+        new WebhookDeliveryMaterializerService(prismaOne),
       ),
       config,
     );
@@ -70,6 +71,7 @@ describe('Outbox worker (integration)', () => {
       repositoryTwo,
       new OutboxHandler(
         new PaymentValidationService(new PaymentLifecycleRepository(prismaTwo)),
+        new WebhookDeliveryMaterializerService(prismaTwo),
       ),
       config,
     );
@@ -7278,6 +7280,235 @@ describe('Outbox worker (integration)', () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('processes due and stale webhook.test deliveries once while leaving future deliveries unclaimed', async () => {
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 10).toString(
+      'base64',
+    );
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION = 'test-v1';
+    let requestCount = 0;
+    const server = createServer((_request, response) => {
+      requestCount += 1;
+      response.statusCode = 200;
+      response.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as { port: number }).port;
+    try {
+      const crypto = new WebhookSecretCryptoService({
+        get: (key: string) => process.env[key],
+      } as never);
+      const endpoint = await new MerchantWebhookEndpointsService(
+        prismaOne,
+        crypto,
+        { get: () => 'test' } as never,
+      ).create('merchant-1', `http://127.0.0.1:${port}/webhook`, 'test-secret');
+      const [futureEvent, staleEvent] = await Promise.all([
+        prismaOne.outboxEvent.create({
+          data: {
+            eventKey: 'webhook-test:future-delivery',
+            eventType: OutboxEventType.WEBHOOK_TEST,
+            aggregateType: 'WEBHOOK_ENDPOINT',
+            aggregateId: endpoint.id,
+            payload: { endpointId: endpoint.id, merchantId: 'merchant-1' },
+          },
+        }),
+        prismaOne.outboxEvent.create({
+          data: {
+            eventKey: 'webhook-test:stale-delivery',
+            eventType: OutboxEventType.WEBHOOK_TEST,
+            aggregateType: 'WEBHOOK_ENDPOINT',
+            aggregateId: endpoint.id,
+            payload: { endpointId: endpoint.id, merchantId: 'merchant-1' },
+          },
+        }),
+      ]);
+      const [future, stale] = await Promise.all([
+        prismaOne.webhookDelivery.create({
+          data: {
+            merchantId: 'merchant-1',
+            webhookEndpointId: endpoint.id,
+            outboxEventId: futureEvent.id,
+            eventId: `${futureEvent.id}:${endpoint.id}`,
+            eventType: 'webhook.test',
+            payload: {
+              type: 'webhook.test',
+              data: { endpointId: endpoint.id },
+            },
+            nextAttemptAt: new Date(Date.now() + 60_000),
+          },
+        }),
+        prismaOne.webhookDelivery.create({
+          data: {
+            merchantId: 'merchant-1',
+            webhookEndpointId: endpoint.id,
+            outboxEventId: staleEvent.id,
+            eventId: `${staleEvent.id}:${endpoint.id}`,
+            eventType: 'webhook.test',
+            payload: {
+              type: 'webhook.test',
+              data: { endpointId: endpoint.id },
+            },
+            status: 'PROCESSING',
+            claimedAt: new Date(Date.now() - 120_000),
+            claimedBy: 'crashed-worker',
+          },
+        }),
+      ]);
+      const config = new WorkerConfigService({
+        ...process.env,
+        DATABASE_URL: process.env.DATABASE_URL!,
+        WEBHOOK_BATCH_SIZE: '10',
+        WEBHOOK_CLAIM_TIMEOUT_SECONDS: '1',
+        WEBHOOK_WORKER_ID: 'test-worker-one',
+      });
+      const processorOne = new WebhookDeliveryProcessorService(
+        prismaOne,
+        config,
+      );
+      const processorTwo = new WebhookDeliveryProcessorService(
+        prismaTwo,
+        new WorkerConfigService({
+          ...process.env,
+          DATABASE_URL: process.env.DATABASE_URL!,
+          WEBHOOK_BATCH_SIZE: '10',
+          WEBHOOK_CLAIM_TIMEOUT_SECONDS: '1',
+          WEBHOOK_WORKER_ID: 'test-worker-two',
+        }),
+      );
+
+      await Promise.all([
+        processorOne.processOnce(),
+        processorTwo.processOnce(),
+      ]);
+
+      const [futureAfter, staleAfter] = await Promise.all([
+        prismaOne.webhookDelivery.findUniqueOrThrow({
+          where: { id: future.id },
+        }),
+        prismaOne.webhookDelivery.findUniqueOrThrow({
+          where: { id: stale.id },
+        }),
+      ]);
+      expect(requestCount).toBe(1);
+      expect(futureAfter).toMatchObject({
+        status: 'PENDING',
+        attemptCount: 0,
+        responseStatus: null,
+      });
+      expect(staleAfter).toMatchObject({
+        status: 'DELIVERED',
+        attemptCount: 1,
+        responseStatus: 200,
+        claimedAt: null,
+        claimedBy: null,
+        nextAttemptAt: null,
+      });
+      expect(staleAfter.deliveredAt).toBeInstanceOf(Date);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('retries transport failures and marks a delivery failed at its maximum attempts', async () => {
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString(
+      'base64',
+    );
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION = 'test-v1';
+    const crypto = new WebhookSecretCryptoService({
+      get: (key: string) => process.env[key],
+    } as never);
+    const endpoint = await new MerchantWebhookEndpointsService(
+      prismaOne,
+      crypto,
+      { get: () => 'test' } as never,
+    ).create('merchant-1', 'http://127.0.0.1:1/unavailable', 'test-secret');
+    const [retryEvent, exhaustedEvent] = await Promise.all([
+      prismaOne.outboxEvent.create({
+        data: {
+          eventKey: 'webhook-test:transport-retry',
+          eventType: OutboxEventType.WEBHOOK_TEST,
+          aggregateType: 'WEBHOOK_ENDPOINT',
+          aggregateId: endpoint.id,
+          payload: { endpointId: endpoint.id, merchantId: 'merchant-1' },
+        },
+      }),
+      prismaOne.outboxEvent.create({
+        data: {
+          eventKey: 'webhook-test:transport-exhausted',
+          eventType: OutboxEventType.WEBHOOK_TEST,
+          aggregateType: 'WEBHOOK_ENDPOINT',
+          aggregateId: endpoint.id,
+          payload: { endpointId: endpoint.id, merchantId: 'merchant-1' },
+        },
+      }),
+    ]);
+    const [retry, exhausted] = await Promise.all([
+      prismaOne.webhookDelivery.create({
+        data: {
+          merchantId: 'merchant-1',
+          webhookEndpointId: endpoint.id,
+          outboxEventId: retryEvent.id,
+          eventId: `${retryEvent.id}:${endpoint.id}`,
+          eventType: 'webhook.test',
+          payload: { type: 'webhook.test' },
+          nextAttemptAt: new Date(0),
+        },
+      }),
+      prismaOne.webhookDelivery.create({
+        data: {
+          merchantId: 'merchant-1',
+          webhookEndpointId: endpoint.id,
+          outboxEventId: exhaustedEvent.id,
+          eventId: `${exhaustedEvent.id}:${endpoint.id}`,
+          eventType: 'webhook.test',
+          payload: { type: 'webhook.test' },
+          attemptCount: 1,
+          nextAttemptAt: new Date(0),
+        },
+      }),
+    ]);
+    const processor = new WebhookDeliveryProcessorService(
+      prismaOne,
+      new WorkerConfigService({
+        ...process.env,
+        DATABASE_URL: process.env.DATABASE_URL!,
+        WEBHOOK_MAX_ATTEMPTS: '2',
+        WEBHOOK_BATCH_SIZE: '10',
+        WEBHOOK_INITIAL_RETRY_SECONDS: '1',
+        WEBHOOK_MAX_RETRY_SECONDS: '1',
+        WEBHOOK_REQUEST_TIMEOUT_MS: '1000',
+      }),
+    );
+
+    await processor.processOnce();
+
+    await expect(
+      prismaOne.webhookDelivery.findUniqueOrThrow({ where: { id: retry.id } }),
+    ).resolves.toMatchObject({
+      status: 'PENDING',
+      attemptCount: 1,
+      responseStatus: null,
+      lastErrorCode: 'NETWORK_ERROR',
+      claimedAt: null,
+      claimedBy: null,
+    });
+    await expect(
+      prismaOne.webhookDelivery.findUniqueOrThrow({
+        where: { id: exhausted.id },
+      }),
+    ).resolves.toMatchObject({
+      status: 'FAILED',
+      attemptCount: 2,
+      responseStatus: null,
+      lastErrorCode: 'NETWORK_ERROR',
+      nextAttemptAt: null,
+      claimedAt: null,
+      claimedBy: null,
+    });
   });
 
   it('generates one NACHA file containing eligible ACH payments exactly once', async () => {

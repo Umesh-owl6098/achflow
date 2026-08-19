@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { OutboxEvent, OutboxEventType, PaymentDirection } from '@prisma/client';
 import { PaymentValidationService } from '../payments/payment-validation.service';
 import { OutboxProcessingError } from './outbox-processing.error';
+import { WebhookDeliveryMaterializerService } from '../webhooks/webhook-delivery-materializer.service';
 
 export { OutboxProcessingError } from './outbox-processing.error';
 
@@ -19,7 +20,10 @@ type PaymentReceivedPayload = {
 export class OutboxHandler {
   private readonly logger = new Logger(OutboxHandler.name);
 
-  constructor(private readonly paymentValidation: PaymentValidationService) {}
+  constructor(
+    private readonly paymentValidation: PaymentValidationService,
+    private readonly webhookDeliveryMaterializer: WebhookDeliveryMaterializerService,
+  ) {}
 
   async handle(event: OutboxEvent): Promise<void> {
     if (event.eventType !== OutboxEventType.PAYMENT_RECEIVED) {
@@ -34,6 +38,7 @@ export class OutboxHandler {
           OutboxEventType.WEBHOOK_TEST,
         ].includes(event.eventType)
       ) {
+        await this.webhookDeliveryMaterializer.materialize(event);
         return;
       }
       throw new OutboxProcessingError('Unsupported outbox event type');
@@ -41,6 +46,7 @@ export class OutboxHandler {
 
     const payload = this.parsePaymentReceivedPayload(event.payload);
     await this.paymentValidation.validate(payload.paymentId, event.id);
+    await this.webhookDeliveryMaterializer.materialize(event);
 
     this.logger.log(
       JSON.stringify({

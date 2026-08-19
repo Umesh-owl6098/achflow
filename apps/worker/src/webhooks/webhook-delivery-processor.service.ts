@@ -1,4 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationShutdown,
+  OnModuleInit,
+} from '@nestjs/common';
 import { createHmac } from 'crypto';
 import { Prisma, WebhookDelivery, WebhookDeliveryStatus } from '@prisma/client';
 import { WebhookSecretCryptoService } from '../../../api/src/webhooks/webhook-secret-crypto.service';
@@ -6,8 +11,14 @@ import { WorkerConfigService } from '../worker-config.service';
 import { WorkerPrismaService } from '../worker-prisma.service';
 
 @Injectable()
-export class WebhookDeliveryProcessorService {
+export class WebhookDeliveryProcessorService
+  implements OnModuleInit, OnApplicationShutdown
+{
+  private readonly logger = new Logger(WebhookDeliveryProcessorService.name);
   private readonly crypto: WebhookSecretCryptoService;
+  private acceptingPolls = true;
+  private timer: NodeJS.Timeout | undefined;
+  private activeBatch: Promise<void> | undefined;
   constructor(
     private readonly prisma: WorkerPrismaService,
     private readonly config: WorkerConfigService,
@@ -16,17 +27,60 @@ export class WebhookDeliveryProcessorService {
       get: (name: string) => process.env[name],
     } as never);
   }
+
+  onModuleInit(): void {
+    this.scheduleNextPoll(0);
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    this.acceptingPolls = false;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    await this.activeBatch;
+  }
+
   async processOnce(): Promise<void> {
+    if (this.activeBatch) {
+      return this.activeBatch;
+    }
+    const batch = this.processClaimedDeliveries();
+    this.activeBatch = batch;
+    try {
+      await batch;
+    } finally {
+      if (this.activeBatch === batch) {
+        this.activeBatch = undefined;
+      }
+    }
+  }
+
+  private async processClaimedDeliveries(): Promise<void> {
     const deliveries = await this.claim();
     await Promise.all(deliveries.map((delivery) => this.process(delivery)));
   }
+
+  private scheduleNextPoll(delayMs: number): void {
+    if (!this.acceptingPolls) return;
+    this.timer = setTimeout(() => {
+      void this.processOnce()
+        .catch(() => {
+          this.logger.error('Webhook delivery processor execution failed.');
+        })
+        .finally(() => {
+          this.scheduleNextPoll(this.config.webhookDeliveryPollIntervalMs);
+        });
+    }, delayMs);
+  }
+
   private claim(): Promise<WebhookDelivery[]> {
     const stale = new Date(
       Date.now() - this.config.webhookClaimTimeoutSeconds * 1000,
     );
     return this.prisma.$transaction((tx) =>
       tx.$queryRaw<WebhookDelivery[]>(Prisma.sql`
-      WITH claimable AS (SELECT "id" FROM "WebhookDelivery" WHERE ("status" = 'PENDING'::"WebhookDeliveryStatus" AND "nextAttemptAt" <= NOW()) OR ("status" = 'PROCESSING'::"WebhookDeliveryStatus" AND "claimedAt" < ${stale}) ORDER BY "nextAttemptAt", "createdAt" LIMIT ${this.config.webhookBatchSize} FOR UPDATE SKIP LOCKED)
+      WITH claimable AS (SELECT "id" FROM "WebhookDelivery" WHERE ("status" = 'PENDING'::"WebhookDeliveryStatus" AND "nextAttemptAt" <= NOW()) OR ("status" = 'PROCESSING'::"WebhookDeliveryStatus" AND ("claimedAt" IS NULL OR "claimedAt" < ${stale})) ORDER BY "nextAttemptAt", "createdAt" LIMIT ${this.config.webhookBatchSize} FOR UPDATE SKIP LOCKED)
       UPDATE "WebhookDelivery" d SET "status" = 'PROCESSING'::"WebhookDeliveryStatus", "claimedAt" = NOW(), "claimedBy" = ${this.config.webhookWorkerId}, "updatedAt" = NOW() FROM claimable WHERE d."id" = claimable."id" RETURNING d.*
     `),
     );

@@ -5,6 +5,7 @@ const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_CLAIM_LEASE_MS = 30_000;
 const DEFAULT_NACHA_GENERATION_INTERVAL_MS = 300_000;
+const DEFAULT_WEBHOOK_DELIVERY_POLL_INTERVAL_MS = 1_000;
 
 @Injectable()
 export class WorkerConfigService {
@@ -20,6 +21,7 @@ export class WorkerConfigService {
   readonly webhookBatchSize: number;
   readonly webhookClaimTimeoutSeconds: number;
   readonly webhookWorkerId: string;
+  readonly webhookDeliveryPollIntervalMs: number;
   readonly nachaGenerationEnabled: boolean;
   readonly nachaGenerationIntervalMs: number;
 
@@ -82,6 +84,11 @@ export class WorkerConfigService {
     );
     this.webhookWorkerId =
       env.WEBHOOK_WORKER_ID?.trim() || 'achflow-webhook-worker';
+    this.webhookDeliveryPollIntervalMs = this.parsePositiveInteger(
+      'WEBHOOK_DELIVERY_POLL_INTERVAL_MS',
+      env.WEBHOOK_DELIVERY_POLL_INTERVAL_MS,
+      DEFAULT_WEBHOOK_DELIVERY_POLL_INTERVAL_MS,
+    );
     this.nachaGenerationEnabled = env.NACHA_GENERATION_ENABLED === 'true';
     this.nachaGenerationIntervalMs = this.parsePositiveInteger(
       'NACHA_GENERATION_INTERVAL_MS',
