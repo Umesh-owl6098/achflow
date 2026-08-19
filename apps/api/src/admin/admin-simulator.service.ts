@@ -47,6 +47,50 @@ export class AdminSimulatorService {
     return { data: runs.map((run) => this.serializeRun(run)) };
   }
 
+  async listMerchants() {
+    this.assertSimulatorEnabled();
+    const businessDate = this.currentBusinessDate();
+    const merchants = await this.prisma.merchant.findMany({
+      select: {
+        id: true,
+        merchantCode: true,
+        displayName: true,
+        status: true,
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: true,
+        dailyAmountLimit: true,
+        fundingAccounts: {
+          where: { status: FundingAccountStatus.ACTIVE },
+          select: { currency: true },
+        },
+        dailyUsage: {
+          where: { businessDate },
+          select: { utilizedAmount: true },
+          take: 1,
+        },
+      },
+      orderBy: { displayName: 'asc' },
+    });
+    return {
+      data: merchants.map((merchant) => ({
+        id: merchant.id,
+        merchantCode: merchant.merchantCode,
+        displayName: merchant.displayName,
+        status: merchant.status,
+        allowAchDebit: merchant.allowAchDebit,
+        allowAchCredit: merchant.allowAchCredit,
+        perPaymentLimit: merchant.perPaymentLimit.toString(),
+        dailyAmountLimit: merchant.dailyAmountLimit.toString(),
+        dailyUtilizedAmountCents:
+          merchant.dailyUsage[0]?.utilizedAmount.toString() ?? '0',
+        activeFundingCurrencies: merchant.fundingAccounts.map((account) =>
+          account.currency.toUpperCase(),
+        ),
+      })),
+    };
+  }
+
   async getRun(id: string) {
     this.assertSimulatorEnabled();
     const run = await this.prisma.simulatorRun.findUnique({ where: { id } });
@@ -438,6 +482,13 @@ export class AdminSimulatorService {
 
   private sleep(milliseconds: number) {
     return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  private currentBusinessDate(): Date {
+    const now = new Date();
+    return new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
   }
 
   private serializeRun(run: {

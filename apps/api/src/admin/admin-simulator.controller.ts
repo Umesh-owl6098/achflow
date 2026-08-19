@@ -14,6 +14,11 @@ export class AdminSimulatorController {
     return this.simulator.listRuns();
   }
 
+  @Get('merchants')
+  merchants() {
+    return this.simulator.listMerchants();
+  }
+
   @Get('runs/:runId')
   get(@Param('runId') runId: string) {
     return this.simulator.getRun(runId);

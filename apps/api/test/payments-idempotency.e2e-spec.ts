@@ -691,6 +691,42 @@ describe('Payments idempotency (integration)', () => {
     expect(payment.status).toBe(PaymentStatus.RECEIVED);
   });
 
+  it('returns safe admin simulator eligibility metadata without merchant credentials', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/admin/simulator/merchants')
+      .set('Authorization', bearer(adminApiKey))
+      .expect(200);
+
+    const body = response.body as unknown as {
+      data: Array<{
+        merchantCode: string;
+        allowAchDebit: boolean;
+        allowAchCredit: boolean;
+        perPaymentLimit: string;
+        dailyAmountLimit: string;
+        dailyUtilizedAmountCents: string;
+        activeFundingCurrencies: string[];
+      }>;
+    };
+    expect(
+      body.data.find((merchant) => merchant.merchantCode === 'TEST_BOTH'),
+    ).toMatchObject({
+      merchantCode: 'TEST_BOTH',
+      allowAchDebit: true,
+      allowAchCredit: true,
+      perPaymentLimit: '1000000',
+      dailyAmountLimit: '5000000',
+      dailyUtilizedAmountCents: '0',
+      activeFundingCurrencies: [],
+    });
+    expect(JSON.stringify(response.body)).not.toContain('hashedApiKey');
+
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/simulator/merchants')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(403);
+  });
+
   it('lists authenticated merchant payments with server-side filters and pagination', async () => {
     const created = await request(app.getHttpServer())
       .post('/api/v1/payments')

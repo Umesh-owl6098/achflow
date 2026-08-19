@@ -13,13 +13,12 @@ import {
 import { PageHeader } from "@/components/foundation/page-header";
 import { StatusBadge } from "@/components/foundation/status-badge";
 import { Button } from "@/components/ui/button";
+import {
+  merchantEligibility,
+  type MerchantEligibility,
+  type SimulatorMerchant,
+} from "@/lib/simulator-eligibility";
 
-type Merchant = {
-  id: string;
-  merchantCode: string;
-  displayName: string;
-  status: "ACTIVE" | "SUSPENDED" | "CLOSED";
-};
 type Run = {
   id: string;
   status: "RUNNING" | "PAUSED" | "STOPPED" | "COMPLETED" | "FAILED";
@@ -119,8 +118,9 @@ export function SimulatorManager() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const merchantsQuery = useQuery({
-    queryKey: ["admin-merchants"],
-    queryFn: () => api<{ data: Merchant[] }>("/api/admin/merchants"),
+    queryKey: ["simulator-merchants"],
+    queryFn: () =>
+      api<{ data: SimulatorMerchant[] }>("/api/admin/simulator/merchants"),
   });
   const runsQuery = useQuery({
     queryKey: ["simulator-runs"],
@@ -133,8 +133,23 @@ export function SimulatorManager() {
     enabled: Boolean(selectedRunId),
     refetchInterval: 2_000,
   });
-  const active = (merchantsQuery.data?.data ?? []).filter(
-    (merchant) => merchant.status === "ACTIVE",
+  const merchants = merchantsQuery.data?.data ?? [];
+  const active = merchants.filter((merchant) => merchant.status === "ACTIVE");
+  const selectedMerchants = merchants.filter((merchant) =>
+    form.merchantIds.includes(merchant.id),
+  );
+  const eligibility = selectedMerchants.map((merchant) =>
+    merchantEligibility(merchant, {
+      direction: form.direction,
+      minimumAmountCents: form.minimumAmountCents,
+      maximumAmountCents: form.maximumAmountCents,
+      transactionCount: form.transactionCount,
+      selectedMerchantCount: selectedMerchants.length,
+      validationFailurePercent: form.validationFailurePercent,
+    }),
+  );
+  const eligibilityByMerchantId = new Map<string, MerchantEligibility>(
+    eligibility.map((result) => [result.merchantId, result]),
   );
   const run =
     detailQuery.data ??
@@ -142,17 +157,21 @@ export function SimulatorManager() {
   const scenarioTotal =
     form.successfulPercent +
     form.validationFailurePercent +
-    form.duplicatePercent +
-    form.insufficientFundsPercent +
-    form.returnPercent +
-    form.delayedProcessingPercent +
-    form.webhookFailurePercent;
+    form.duplicatePercent;
   const configValid =
     form.merchantIds.length > 0 &&
     form.minimumAmountCents <= form.maximumAmountCents &&
-    scenarioTotal === 100;
+    scenarioTotal === 100 &&
+    eligibility.every((merchant) => merchant.eligible);
   const update = <K extends keyof Form>(key: K, value: Form[K]) =>
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      insufficientFundsPercent: 0,
+      returnPercent: 0,
+      delayedProcessingPercent: 0,
+      webhookFailurePercent: 0,
+    }));
   const start = async () => {
     const payload = {
       merchantIds: form.merchantIds,
@@ -168,11 +187,11 @@ export function SimulatorManager() {
       scenario: {
         successfulPercent: form.successfulPercent,
         validationFailurePercent: form.validationFailurePercent,
-        insufficientFundsPercent: form.insufficientFundsPercent,
-        returnPercent: form.returnPercent,
+        insufficientFundsPercent: 0,
+        returnPercent: 0,
         duplicatePercent: form.duplicatePercent,
-        delayedProcessingPercent: form.delayedProcessingPercent,
-        webhookFailurePercent: form.webhookFailurePercent,
+        delayedProcessingPercent: 0,
+        webhookFailurePercent: 0,
       },
     };
     const created = await api<Run>("/api/admin/simulator/runs", {
@@ -222,33 +241,55 @@ export function SimulatorManager() {
             </p>
           </div>
           <fieldset>
-            <legend className="mb-2 text-sm font-medium">
-              Active merchants
-            </legend>
+            <legend className="mb-2 text-sm font-medium">Merchants</legend>
             <div className="flex flex-wrap gap-2">
-              {active.map((merchant) => (
-                <label
-                  key={merchant.id}
-                  className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm dark:border-slate-800"
-                >
-                  <input
-                    type="checkbox"
-                    checked={form.merchantIds.includes(merchant.id)}
-                    onChange={(event) =>
-                      update(
-                        "merchantIds",
-                        event.target.checked
-                          ? [...form.merchantIds, merchant.id]
-                          : form.merchantIds.filter((id) => id !== merchant.id),
-                      )
-                    }
-                  />
-                  {merchant.displayName}{" "}
-                  <span className="text-xs text-slate-500">
-                    {merchant.merchantCode}
-                  </span>
-                </label>
-              ))}
+              {merchants.map((merchant) => {
+                const selected = form.merchantIds.includes(merchant.id);
+                const result = eligibilityByMerchantId.get(merchant.id);
+                const inactive = merchant.status !== "ACTIVE";
+                return (
+                  <label
+                    key={merchant.id}
+                    className="flex max-w-full items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm dark:border-slate-800"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={inactive}
+                      onChange={(event) =>
+                        update(
+                          "merchantIds",
+                          event.target.checked
+                            ? [...form.merchantIds, merchant.id]
+                            : form.merchantIds.filter(
+                                (id) => id !== merchant.id,
+                              ),
+                        )
+                      }
+                    />
+                    {merchant.displayName}{" "}
+                    <span className="text-xs text-slate-500">
+                      {merchant.merchantCode}
+                    </span>
+                    <StatusBadge tone={inactive ? "neutral" : "success"}>
+                      {merchant.status}
+                    </StatusBadge>
+                    {selected && result ? (
+                      <span
+                        className={
+                          result.eligible
+                            ? "text-xs text-emerald-700 dark:text-emerald-400"
+                            : "text-xs text-red-700 dark:text-red-400"
+                        }
+                      >
+                        {result.eligible
+                          ? `Eligible · safe maximum ${money(String(result.safeMaximumAmountCents ?? 0))}`
+                          : `Not eligible · ${result.reasons.join(" ")}`}
+                      </span>
+                    ) : null}
+                  </label>
+                );
+              })}
             </div>
             {active.length === 0 ? (
               <p className="mt-2 text-sm text-amber-700">
@@ -342,32 +383,32 @@ export function SimulatorManager() {
                 onChange={(value) => update("duplicatePercent", value)}
               />
               <NumberInput
-                label="Return % (unavailable)"
-                value={form.returnPercent}
+                label="Return % (Unavailable)"
+                value={0}
                 min={0}
                 max={100}
-                onChange={(value) => update("returnPercent", value)}
+                disabled
               />
               <NumberInput
-                label="Insufficient funds % (unavailable)"
-                value={form.insufficientFundsPercent}
+                label="Insufficient funds % (Unavailable)"
+                value={0}
                 min={0}
                 max={100}
-                onChange={(value) => update("insufficientFundsPercent", value)}
+                disabled
               />
               <NumberInput
-                label="Delayed processing % (unavailable)"
-                value={form.delayedProcessingPercent}
+                label="Delayed processing % (Unavailable)"
+                value={0}
                 min={0}
                 max={100}
-                onChange={(value) => update("delayedProcessingPercent", value)}
+                disabled
               />
               <NumberInput
-                label="Webhook failures % (unavailable)"
-                value={form.webhookFailurePercent}
+                label="Webhook failures % (Unavailable)"
+                value={0}
                 min={0}
                 max={100}
-                onChange={(value) => update("webhookFailurePercent", value)}
+                disabled
               />
             </div>
             <p
@@ -377,11 +418,16 @@ export function SimulatorManager() {
                   : "mt-2 text-xs text-red-600"
               }
             >
-              Outcome total: {scenarioTotal}% (must equal 100).
-              Insufficient-funds, delayed, return, and webhook fault injection
-              require bank/testing hooks not exposed by the current production
-              API.
+              Outcome total: {scenarioTotal}% (must equal 100). Return,
+              insufficient-funds, delayed-processing and webhook-failure
+              injection are not available in the current simulator.
             </p>
+            {eligibility.some((merchant) => !merchant.eligible) ? (
+              <p className="mt-2 text-xs text-red-600">
+                Resolve each selected merchant&apos;s eligibility issue before
+                starting a run.
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-2">
             {configValid ? (
@@ -632,13 +678,15 @@ function NumberInput({
   value,
   min,
   max,
-  onChange,
+  onChange = () => undefined,
+  disabled = false,
 }: {
   label: string;
   value: number;
   min: number;
   max: number;
-  onChange: (value: number) => void;
+  onChange?: (value: number) => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="grid gap-1 text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -648,6 +696,7 @@ function NumberInput({
         value={value}
         min={min}
         max={max}
+        disabled={disabled}
         onChange={(event) =>
           onChange(
             Math.max(
@@ -656,7 +705,7 @@ function NumberInput({
             ),
           )
         }
-        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-800 dark:bg-slate-950"
       />
     </label>
   );

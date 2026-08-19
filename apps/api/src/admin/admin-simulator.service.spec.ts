@@ -104,6 +104,46 @@ describe('AdminSimulatorService', () => {
     await expect(service.listRuns()).resolves.toEqual({ data: [] });
   });
 
+  it('returns only safe merchant eligibility metadata without credentials', async () => {
+    process.env.NODE_ENV = 'test';
+    const prisma = {
+      merchant: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'merchant-1',
+            merchantCode: 'SIMULATOR',
+            displayName: 'Simulator merchant',
+            status: MerchantStatus.ACTIVE,
+            allowAchDebit: true,
+            allowAchCredit: true,
+            perPaymentLimit: 1_000n,
+            dailyAmountLimit: 10_000n,
+            dailyUsage: [{ utilizedAmount: 250n }],
+            fundingAccounts: [{ currency: 'usd' }],
+          },
+        ]),
+      },
+    };
+    const service = new AdminSimulatorService(prisma as never, {} as never);
+
+    await expect(service.listMerchants()).resolves.toEqual({
+      data: [
+        {
+          id: 'merchant-1',
+          merchantCode: 'SIMULATOR',
+          displayName: 'Simulator merchant',
+          status: MerchantStatus.ACTIVE,
+          allowAchDebit: true,
+          allowAchCredit: true,
+          perPaymentLimit: '1000',
+          dailyAmountLimit: '10000',
+          dailyUtilizedAmountCents: '250',
+          activeFundingCurrencies: ['USD'],
+        },
+      ],
+    });
+  });
+
   it('rejects inactive merchants even when simulator access is explicitly enabled', async () => {
     process.env.NODE_ENV = 'production';
     process.env.SIMULATOR_ENABLED = 'true';
