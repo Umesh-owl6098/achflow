@@ -9,7 +9,7 @@ import { ErrorState, LoadingState } from "@/components/foundation/states";
 import { PageHeader } from "@/components/foundation/page-header";
 import { StatusBadge } from "@/components/foundation/status-badge";
 
-type Health = "HEALTHY" | "UNHEALTHY" | "UNKNOWN";
+type Health = "HEALTHY" | "UNHEALTHY" | "STALE" | "UNKNOWN";
 type SystemStatus = {
   general: {
     platformName: string;
@@ -27,6 +27,10 @@ type SystemStatus = {
     maximumPaymentAmount: string;
     retryPolicy: string;
     returnHandling: string;
+    nachaGeneration: {
+      status: "ENABLED" | "DISABLED" | "UNKNOWN";
+      intervalMs: number | null;
+    };
   };
   nacha: {
     immediateDestination: string;
@@ -240,6 +244,14 @@ export function SettingsManager() {
               label="Return handling"
               value={status.achProcessing.returnHandling}
             />
+            <Setting
+              label="Scheduled NACHA generation"
+              value={
+                status.achProcessing.nachaGeneration.status === "ENABLED"
+                  ? `Enabled — every ${formatInterval(status.achProcessing.nachaGeneration.intervalMs)}`
+                  : status.achProcessing.nachaGeneration.status
+              }
+            />
           </SettingsGrid>
         </SettingsSection>
       ) : null}
@@ -382,7 +394,7 @@ export function SettingsManager() {
                   ? new Date(
                       status.health.lastWorkerHeartbeatAt,
                     ).toLocaleString()
-                  : "Not available — worker heartbeat is not persisted"
+                  : "No worker heartbeat recorded"
               }
             />
           </SettingsGrid>
@@ -474,4 +486,11 @@ function HealthCard({ label, health }: { label: string; health: Health }) {
       </div>
     </div>
   );
+}
+
+function formatInterval(intervalMs: number | null): string {
+  if (!intervalMs) return "unknown interval";
+  if (intervalMs % 60_000 === 0) return `${intervalMs / 60_000} minutes`;
+  if (intervalMs % 1_000 === 0) return `${intervalMs / 1_000} seconds`;
+  return `${intervalMs} ms`;
 }

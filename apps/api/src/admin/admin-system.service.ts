@@ -17,17 +17,26 @@ export class AdminSystemService {
   ) {}
 
   async getStatus() {
-    const [database, redis, outboxBacklog, pendingWebhookDeliveries] =
-      await Promise.all([
-        this.databaseHealthy(),
-        this.redis.ping(),
-        this.prisma.outboxEvent.count({
-          where: { status: OutboxEventStatus.PENDING },
-        }),
-        this.prisma.webhookDelivery.count({
-          where: { status: WebhookDeliveryStatus.PENDING },
-        }),
-      ]);
+    const [
+      database,
+      redis,
+      outboxBacklog,
+      pendingWebhookDeliveries,
+      workerHeartbeat,
+    ] = await Promise.all([
+      this.databaseHealthy(),
+      this.redis.ping(),
+      this.prisma.outboxEvent.count({
+        where: { status: OutboxEventStatus.PENDING },
+      }),
+      this.prisma.webhookDelivery.count({
+        where: { status: WebhookDeliveryStatus.PENDING },
+      }),
+      this.prisma.workerHeartbeat.findFirst({
+        orderBy: { lastSeenAt: 'desc' },
+      }),
+    ]);
+    const worker = this.workerHealth(workerHeartbeat?.lastSeenAt ?? null);
 
     return {
       general: {
@@ -47,6 +56,14 @@ export class AdminSystemService {
         retryPolicy: 'Exponential backoff, maximum 5 attempts',
         returnHandling:
           'Supported return codes transition settled payments to returned',
+        nachaGeneration: workerHeartbeat
+          ? {
+              status: workerHeartbeat.nachaGenerationEnabled
+                ? 'ENABLED'
+                : 'DISABLED',
+              intervalMs: workerHeartbeat.nachaGenerationIntervalMs,
+            }
+          : { status: 'UNKNOWN', intervalMs: null },
       },
       nacha: {
         immediateDestination: '*****6789',
@@ -84,8 +101,9 @@ export class AdminSystemService {
         api: 'HEALTHY',
         database: database ? 'HEALTHY' : 'UNHEALTHY',
         redis: redis ? 'HEALTHY' : 'UNHEALTHY',
-        worker: 'UNKNOWN',
-        lastWorkerHeartbeatAt: null,
+        worker,
+        lastWorkerHeartbeatAt:
+          workerHeartbeat?.lastSeenAt.toISOString() ?? null,
         outboxBacklog,
         pendingWebhookDeliveries,
       },
@@ -106,5 +124,18 @@ export class AdminSystemService {
     const value = this.config.get<string>(name);
     const parsed = value ? Number(value) : fallback;
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  private workerHealth(
+    lastSeenAt: Date | null,
+  ): 'HEALTHY' | 'STALE' | 'UNKNOWN' {
+    if (!lastSeenAt) return 'UNKNOWN';
+    const staleAfterSeconds = this.positiveInteger(
+      'WORKER_HEARTBEAT_STALE_SECONDS',
+      30,
+    );
+    return Date.now() - lastSeenAt.getTime() <= staleAfterSeconds * 1000
+      ? 'HEALTHY'
+      : 'STALE';
   }
 }

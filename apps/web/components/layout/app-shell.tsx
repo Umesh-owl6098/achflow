@@ -20,6 +20,7 @@ import {
 import { StatusBadge } from "@/components/foundation/status-badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { environmentLabel } from "@/lib/environment";
 import { ThemeToggle } from "./theme-toggle";
 
 const navigation = [
@@ -48,6 +49,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const title = pageTitles[pathname] ?? "ACHFlow";
+  const environment = environmentLabel(process.env.NODE_ENV);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950 dark:bg-slate-950 dark:text-slate-100">
@@ -142,7 +144,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm outline-none placeholder:text-slate-400 focus:border-slate-400 focus:ring-2 focus:ring-slate-200 dark:border-slate-800 dark:bg-slate-900 dark:focus:border-slate-600 dark:focus:ring-slate-800"
             />
           </div>
-          <StatusBadge tone="success">Local</StatusBadge>
+          <StatusBadge
+            tone={environment === "Production" ? "pending" : "success"}
+          >
+            {environment}
+          </StatusBadge>
           <ThemeToggle />
           <Button variant="ghost" size="icon" aria-label="Notifications">
             <Bell className="h-4 w-4" />

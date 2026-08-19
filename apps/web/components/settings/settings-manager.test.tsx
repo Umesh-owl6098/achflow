@@ -20,6 +20,7 @@ const status = {
     maximumPaymentAmount: "Merchant-specific limits",
     retryPolicy: "Exponential backoff, maximum 5 attempts",
     returnHandling: "Supported returns",
+    nachaGeneration: { status: "ENABLED" as const, intervalMs: 300000 },
   },
   nacha: {
     immediateDestination: "*****6789",
@@ -96,7 +97,7 @@ describe("SettingsManager", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows live backlog and honest unknown worker health", async () => {
+  it("shows live backlog, unknown worker health, and scheduled NACHA generation", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -109,11 +110,14 @@ describe("SettingsManager", () => {
     renderSettings();
     await screen.findByText("ACHFlow");
 
+    fireEvent.click(screen.getByRole("button", { name: "ACH Processing" }));
+    expect(screen.getByText("Enabled — every 5 minutes")).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "System Health" }));
     expect(screen.getByText("Outbox backlog")).toBeInTheDocument();
     expect(screen.getByText("UNKNOWN")).toBeInTheDocument();
     expect(
-      screen.getByText("Not available — worker heartbeat is not persisted"),
+      screen.getByText("No worker heartbeat recorded"),
     ).toBeInTheDocument();
   });
 });

@@ -10,6 +10,7 @@ import { WebhookDeliveryMaterializerService } from './webhooks/webhook-delivery-
 import { WebhookDeliveryProcessorService } from './webhooks/webhook-delivery-processor.service';
 import { NachaFileGeneratorService } from './ach/nacha-file-generator.service';
 import { NachaGenerationSchedulerService } from './ach/nacha-generation-scheduler.service';
+import { WorkerHeartbeatService } from './worker-heartbeat.service';
 
 @Module({
   providers: [
@@ -24,6 +25,7 @@ import { NachaGenerationSchedulerService } from './ach/nacha-generation-schedule
     WebhookDeliveryProcessorService,
     NachaFileGeneratorService,
     NachaGenerationSchedulerService,
+    WorkerHeartbeatService,
   ],
 })
 export class AppModule {}

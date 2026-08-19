@@ -326,6 +326,17 @@ model WebhookDelivery {
   @@index([webhookEndpointId])
 }
 
+model WorkerHeartbeat {
+  workerId                  String   @id
+  lastSeenAt                DateTime
+  nachaGenerationEnabled    Boolean
+  nachaGenerationIntervalMs Int
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@index([lastSeenAt])
+}
+
 model SimulatorRun {
   id                String             @id @default(uuid())
   status            SimulatorRunStatus @default(RUNNING)

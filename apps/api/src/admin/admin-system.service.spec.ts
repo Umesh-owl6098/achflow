@@ -25,6 +25,7 @@ describe('AdminSystemService', () => {
       $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
       outboxEvent: { count: jest.fn().mockResolvedValue(3) },
       webhookDelivery: { count: jest.fn().mockResolvedValue(2) },
+      workerHeartbeat: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     const redis = { ping: jest.fn().mockResolvedValue(true) };
     const service = new AdminSystemService(
@@ -52,5 +53,76 @@ describe('AdminSystemService', () => {
     expect(JSON.stringify(result)).not.toContain('secret-admin-key');
     expect(JSON.stringify(result)).not.toContain('postgresql://private');
     expect(JSON.stringify(result)).not.toContain('redis://private');
+  });
+
+  it('reports recent worker heartbeats and scheduled NACHA generation', async () => {
+    const now = new Date('2026-08-19T12:00:00.000Z');
+    jest.spyOn(Date, 'now').mockReturnValue(now.getTime());
+    const service = new AdminSystemService(
+      {
+        get: jest.fn(
+          (name: string) =>
+            (
+              ({
+                WORKER_HEARTBEAT_STALE_SECONDS: '30',
+              }) as Record<string, string>
+            )[name],
+        ),
+      } as never,
+      {
+        $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+        outboxEvent: { count: jest.fn().mockResolvedValue(0) },
+        webhookDelivery: { count: jest.fn().mockResolvedValue(0) },
+        workerHeartbeat: {
+          findFirst: jest.fn().mockResolvedValue({
+            lastSeenAt: new Date('2026-08-19T11:59:45.000Z'),
+            nachaGenerationEnabled: true,
+            nachaGenerationIntervalMs: 300_000,
+          }),
+        },
+      } as never,
+      { ping: jest.fn().mockResolvedValue(true) } as never,
+    );
+
+    const result = await service.getStatus();
+
+    expect(result.health).toMatchObject({
+      worker: 'HEALTHY',
+      lastWorkerHeartbeatAt: '2026-08-19T11:59:45.000Z',
+    });
+    expect(result.achProcessing.nachaGeneration).toEqual({
+      status: 'ENABLED',
+      intervalMs: 300_000,
+    });
+    jest.restoreAllMocks();
+  });
+
+  it('reports a stale worker heartbeat after its configured expiry', async () => {
+    const now = new Date('2026-08-19T12:00:00.000Z');
+    jest.spyOn(Date, 'now').mockReturnValue(now.getTime());
+    const service = new AdminSystemService(
+      { get: jest.fn(() => '30') } as never,
+      {
+        $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+        outboxEvent: { count: jest.fn().mockResolvedValue(0) },
+        webhookDelivery: { count: jest.fn().mockResolvedValue(0) },
+        workerHeartbeat: {
+          findFirst: jest.fn().mockResolvedValue({
+            lastSeenAt: new Date('2026-08-19T11:59:29.000Z'),
+            nachaGenerationEnabled: false,
+            nachaGenerationIntervalMs: 300_000,
+          }),
+        },
+      } as never,
+      { ping: jest.fn().mockResolvedValue(true) } as never,
+    );
+
+    await expect(service.getStatus()).resolves.toMatchObject({
+      health: { worker: 'STALE' },
+      achProcessing: {
+        nachaGeneration: { status: 'DISABLED', intervalMs: 300_000 },
+      },
+    });
+    jest.restoreAllMocks();
   });
 });

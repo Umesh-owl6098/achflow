@@ -6,6 +6,7 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_CLAIM_LEASE_MS = 30_000;
 const DEFAULT_NACHA_GENERATION_INTERVAL_MS = 300_000;
 const DEFAULT_WEBHOOK_DELIVERY_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS = 10_000;
 
 @Injectable()
 export class WorkerConfigService {
@@ -24,6 +25,8 @@ export class WorkerConfigService {
   readonly webhookDeliveryPollIntervalMs: number;
   readonly nachaGenerationEnabled: boolean;
   readonly nachaGenerationIntervalMs: number;
+  readonly workerHeartbeatId: string;
+  readonly workerHeartbeatIntervalMs: number;
 
   constructor(
     @Optional()
@@ -94,6 +97,13 @@ export class WorkerConfigService {
       'NACHA_GENERATION_INTERVAL_MS',
       env.NACHA_GENERATION_INTERVAL_MS,
       DEFAULT_NACHA_GENERATION_INTERVAL_MS,
+    );
+    this.workerHeartbeatId =
+      env.WORKER_HEARTBEAT_ID?.trim() || 'achflow-worker';
+    this.workerHeartbeatIntervalMs = this.parsePositiveInteger(
+      'WORKER_HEARTBEAT_INTERVAL_MS',
+      env.WORKER_HEARTBEAT_INTERVAL_MS,
+      DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS,
     );
   }
 
