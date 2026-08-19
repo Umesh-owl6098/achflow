@@ -1534,6 +1534,153 @@ describe('Payments idempotency (integration)', () => {
     });
   });
 
+  it('returns a settled ACH debit once and restores its original funding account balance', async () => {
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { merchantCode: 'TEST_BOTH' },
+    });
+    const fundingAccount = await prisma.fundingAccount.create({
+      data: {
+        merchantId: merchant.id,
+        currency: 'USD',
+        status: FundingAccountStatus.ACTIVE,
+      },
+    });
+    await prisma.ledgerEntry.createMany({
+      data: [
+        {
+          entryKey: 'initial-credit:api-debit-return',
+          fundingAccountId: fundingAccount.id,
+          entryType: LedgerEntryType.INITIAL_CREDIT,
+          amount: BigInt(10_000),
+        },
+        {
+          entryKey: 'debit-posted:api-debit-return-payment',
+          fundingAccountId: fundingAccount.id,
+          paymentId: 'api-debit-return-payment',
+          entryType: LedgerEntryType.DEBIT_POSTED,
+          amount: BigInt(2_500),
+        },
+      ],
+    });
+    await prisma.payment.create({
+      data: {
+        id: 'api-debit-return-payment',
+        merchantId: merchant.id,
+        idempotencyKey: 'api-debit-return-idempotency',
+        requestFingerprint: 'api-debit-return-fingerprint',
+        externalReference: 'api-debit-return-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'api-debit-return-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SETTLED,
+        validatedAt: new Date(),
+        exportedAt: new Date(),
+      },
+    });
+
+    const [first, second] = await Promise.all([
+      request(app.getHttpServer())
+        .post('/api/v1/payments/api-debit-return-payment/return')
+        .set('Authorization', bearer(testBothApiKey))
+        .send({ returnCode: 'R01' }),
+      request(app.getHttpServer())
+        .post('/api/v1/payments/api-debit-return-payment/return')
+        .set('Authorization', bearer(testBothApiKey))
+        .send({ returnCode: 'R01' }),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body).toMatchObject({
+      id: 'api-debit-return-payment',
+      status: PaymentStatus.RETURNED,
+      failureCode: 'R01',
+      failureReason: 'ACH debit return',
+    });
+    expect(second.body).toMatchObject({
+      id: 'api-debit-return-payment',
+      status: PaymentStatus.RETURNED,
+    });
+
+    const details = await request(app.getHttpServer())
+      .get('/api/v1/payments/api-debit-return-payment')
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    const [payment, reservations, returnEntries, returnedEvents] =
+      await Promise.all([
+        prisma.payment.findUniqueOrThrow({
+          where: { id: 'api-debit-return-payment' },
+        }),
+        prisma.reservation.count({
+          where: { paymentId: 'api-debit-return-payment' },
+        }),
+        prisma.ledgerEntry.findMany({
+          where: {
+            paymentId: 'api-debit-return-payment',
+            entryType: LedgerEntryType.RETURN,
+          },
+        }),
+        prisma.outboxEvent.findMany({
+          where: {
+            aggregateId: 'api-debit-return-payment',
+            aggregateType: 'PAYMENT',
+            eventType: OutboxEventType.PAYMENT_RETURNED,
+          },
+        }),
+      ]);
+
+    expect(payment.status).toBe(PaymentStatus.RETURNED);
+    expect(reservations).toBe(0);
+    expect(returnEntries).toEqual([
+      expect.objectContaining({
+        entryKey: 'debit-return:api-debit-return-payment',
+        fundingAccountId: fundingAccount.id,
+        amount: BigInt(2_500),
+      }),
+    ]);
+    expect(returnedEvents).toHaveLength(1);
+    const detailsBody = details.body as {
+      status: PaymentStatus;
+      reservation: null;
+      fundingAccount: { id: string; currency: string };
+      ledgerSummary: {
+        postedBalance: string;
+        availableBalance: string;
+        entries: Array<{
+          entryKey: string;
+          entryType: LedgerEntryType;
+          amount: string;
+        }>;
+      };
+    };
+    expect(detailsBody).toMatchObject({
+      status: PaymentStatus.RETURNED,
+      reservation: null,
+      fundingAccount: { id: fundingAccount.id, currency: 'USD' },
+      ledgerSummary: {
+        postedBalance: '10000',
+        availableBalance: '10000',
+      },
+    });
+    expect(detailsBody.ledgerSummary.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entryKey: 'debit-posted:api-debit-return-payment',
+          entryType: LedgerEntryType.DEBIT_POSTED,
+          amount: '2500',
+        }),
+        expect.objectContaining({
+          entryKey: 'debit-return:api-debit-return-payment',
+          entryType: LedgerEntryType.RETURN,
+          amount: '2500',
+        }),
+      ]),
+    );
+  });
+
   it('does not partially settle a submitted ACH debit without an active matching funding account', async () => {
     const merchant = await prisma.merchant.findUniqueOrThrow({
       where: { merchantCode: 'TEST_BOTH' },

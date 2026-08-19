@@ -5374,6 +5374,162 @@ describe('Outbox worker (integration)', () => {
     expect(await prismaOne.ledgerEntry.count()).toBe(2);
   });
 
+  it('returns a settled ACH debit exactly once across repeated and concurrent calls', async () => {
+    const settledAt = new Date(Date.UTC(2026, 6, 29));
+    await prismaOne.ledgerEntry.update({
+      where: { entryKey: 'initial-credit:merchant-1' },
+      data: { amount: BigInt(10_000) },
+    });
+    await prismaOne.payment.create({
+      data: {
+        id: 'concurrent-debit-return-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'concurrent-debit-return-idem',
+        requestFingerprint: 'concurrent-debit-return-fingerprint',
+        externalReference: 'concurrent-debit-return-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'concurrent-debit-return-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SETTLED,
+        validatedAt: settledAt,
+        exportedAt: settledAt,
+        createdAt: settledAt,
+      },
+    });
+    await prismaOne.ledgerEntry.create({
+      data: {
+        entryKey: 'debit-posted:concurrent-debit-return-payment',
+        fundingAccountId: 'funding-account-1',
+        paymentId: 'concurrent-debit-return-payment',
+        entryType: LedgerEntryType.DEBIT_POSTED,
+        amount: BigInt(2_500),
+      },
+    });
+    const balance = () =>
+      prismaOne.$queryRaw<{ total: bigint | null }[]>(
+        Prisma.sql`SELECT COALESCE(SUM(CASE WHEN "entryType" IN ('INITIAL_CREDIT'::"LedgerEntryType", 'CREDIT_POSTED'::"LedgerEntryType", 'RETURN'::"LedgerEntryType", 'REVERSAL'::"LedgerEntryType", 'ADJUSTMENT'::"LedgerEntryType") THEN "amount" WHEN "entryType" = 'DEBIT_POSTED'::"LedgerEntryType" THEN -"amount" ELSE 0 END), 0) AS total FROM "LedgerEntry" WHERE "fundingAccountId" = ${'funding-account-1'}`,
+      );
+    expect(BigInt((await balance())[0]?.total ?? 0)).toBe(BigInt(7_500));
+
+    const repositoryOne = new PaymentLifecycleRepository(prismaOne);
+    const repositoryTwo = new PaymentLifecycleRepository(prismaTwo);
+    const [first, second] = await Promise.all([
+      repositoryOne.returnSettlementForPayment(
+        'concurrent-debit-return-payment',
+        'R01',
+      ),
+      repositoryTwo.returnSettlementForPayment(
+        'concurrent-debit-return-payment',
+        'R01',
+      ),
+    ]);
+    const third = await repositoryOne.returnSettlementForPayment(
+      'concurrent-debit-return-payment',
+      'R01',
+    );
+
+    const [payment, reservations, debitEntries, returnEntries, returnedEvents] =
+      await Promise.all([
+        prismaOne.payment.findUniqueOrThrow({
+          where: { id: 'concurrent-debit-return-payment' },
+        }),
+        prismaOne.reservation.count({
+          where: { paymentId: 'concurrent-debit-return-payment' },
+        }),
+        prismaOne.ledgerEntry.findMany({
+          where: {
+            paymentId: 'concurrent-debit-return-payment',
+            entryType: LedgerEntryType.DEBIT_POSTED,
+          },
+        }),
+        prismaOne.ledgerEntry.findMany({
+          where: {
+            paymentId: 'concurrent-debit-return-payment',
+            entryType: LedgerEntryType.RETURN,
+          },
+        }),
+        prismaOne.outboxEvent.findMany({
+          where: {
+            aggregateId: 'concurrent-debit-return-payment',
+            aggregateType: 'PAYMENT',
+            eventType: OutboxEventType.PAYMENT_RETURNED,
+          },
+        }),
+      ]);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(third).toBeNull();
+    expect(payment).toMatchObject({
+      status: PaymentStatus.RETURNED,
+      failureCode: 'R01',
+      failureReason: 'ACH debit return',
+    });
+    expect(reservations).toBe(0);
+    expect(debitEntries).toEqual([
+      expect.objectContaining({
+        entryKey: 'debit-posted:concurrent-debit-return-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(2_500),
+      }),
+    ]);
+    expect(returnEntries).toEqual([
+      expect.objectContaining({
+        entryKey: 'debit-return:concurrent-debit-return-payment',
+        fundingAccountId: 'funding-account-1',
+        amount: BigInt(2_500),
+      }),
+    ]);
+    expect(returnedEvents).toHaveLength(1);
+    expect(BigInt((await balance())[0]?.total ?? 0)).toBe(BigInt(10_000));
+  });
+
+  it('rejects a non-settled ACH debit return without financial effects', async () => {
+    await prismaOne.payment.create({
+      data: {
+        id: 'submitted-debit-return-payment',
+        merchantId: 'merchant-1',
+        idempotencyKey: 'submitted-debit-return-idem',
+        requestFingerprint: 'submitted-debit-return-fingerprint',
+        externalReference: 'submitted-debit-return-reference',
+        direction: PaymentDirection.DEBIT,
+        amountCents: BigInt(2_500),
+        currency: 'USD',
+        receiverName: 'Receiver Inc',
+        receiverAccountRef: 'submitted-debit-return-account',
+        routingNumber: '021000021',
+        status: PaymentStatus.SUBMITTED,
+        validatedAt: new Date(),
+        exportedAt: new Date(),
+      },
+    });
+
+    await expect(
+      new PaymentLifecycleRepository(prismaOne).returnSettlementForPayment(
+        'submitted-debit-return-payment',
+        'R01',
+      ),
+    ).rejects.toMatchObject({
+      safeMessage: 'Payment is not settled for return',
+    });
+    expect(
+      await prismaOne.ledgerEntry.count({
+        where: { paymentId: 'submitted-debit-return-payment' },
+      }),
+    ).toBe(0);
+    expect(
+      await prismaOne.outboxEvent.count({
+        where: {
+          aggregateId: 'submitted-debit-return-payment',
+          eventType: OutboxEventType.PAYMENT_RETURNED,
+        },
+      }),
+    ).toBe(0);
+  });
+
   it('does not settle a submitted ACH debit without an active matching funding account', async () => {
     const submittedAt = new Date(Date.UTC(2026, 6, 29));
     await prismaOne.payment.create({
@@ -5651,6 +5807,9 @@ describe('Outbox worker (integration)', () => {
       'first-return-payment',
       'R01',
     );
+    if (!firstReturn || !secondReturn) {
+      throw new Error('Expected credit return to return its reservation.');
+    }
     const reservations = await prismaOne.reservation.findMany({
       where: { paymentId: 'first-return-payment' },
     });
@@ -5781,6 +5940,11 @@ describe('Outbox worker (integration)', () => {
       firstReturnPromise,
       secondReturnPromise,
     ]);
+    if (!firstReturn || !secondReturn) {
+      throw new Error(
+        'Expected both concurrent credit returns to return reservations.',
+      );
+    }
     const reservations = await prismaOne.reservation.findMany({
       where: { paymentId: 'concurrent-return-payment' },
     });
@@ -6163,6 +6327,9 @@ describe('Outbox worker (integration)', () => {
       'end-to-end-payment',
       'R01',
     );
+    if (!returned) {
+      throw new Error('Expected credit return to return its reservation.');
+    }
 
     const payment = await prismaOne.payment.findUniqueOrThrow({
       where: { id: 'end-to-end-payment' },

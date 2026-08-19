@@ -306,10 +306,9 @@ export class PaymentEngineService {
       const reservation = await transaction.reservation.findUnique({
         where: { paymentId },
       });
-      if (!reservation)
-        throw new NotFoundException(
-          `Reservation for payment ${paymentId} was not found.`,
-        );
+      if (!reservation) {
+        return this.returnDebitPayment(transaction, paymentId, returnCode);
+      }
       if (reservation.status === ReservationStatus.RETURNED) return reservation;
       if (reservation.status !== ReservationStatus.SETTLED)
         throw new BadRequestException('Reservation is not settled for return.');
@@ -347,6 +346,81 @@ export class PaymentEngineService {
       });
       return returned;
     });
+  }
+
+  private async returnDebitPayment(
+    transaction: Prisma.TransactionClient,
+    paymentId: string,
+    returnCode: string,
+  ): Promise<null> {
+    await transaction.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${paymentId}, 0))`,
+    );
+    const payment = await transaction.payment.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        direction: true,
+        amountCents: true,
+        status: true,
+      },
+    });
+    if (!payment || payment.direction !== PaymentDirection.DEBIT) {
+      throw new NotFoundException(
+        `Reservation for payment ${paymentId} was not found.`,
+      );
+    }
+    if (payment.status === PaymentStatus.RETURNED) return null;
+    if (payment.status !== PaymentStatus.SETTLED) {
+      throw new BadRequestException('Payment is not settled for return.');
+    }
+
+    const debitPosted = await transaction.ledgerEntry.findUnique({
+      where: { entryKey: `debit-posted:${paymentId}` },
+    });
+    if (
+      !debitPosted ||
+      debitPosted.paymentId !== paymentId ||
+      debitPosted.entryType !== LedgerEntryType.DEBIT_POSTED ||
+      debitPosted.amount !== payment.amountCents
+    ) {
+      throw new BadRequestException(
+        'Posted debit ledger entry is invalid for return.',
+      );
+    }
+
+    const returned = await transaction.payment.updateMany({
+      where: { id: paymentId, status: PaymentStatus.SETTLED },
+      data: {
+        status: PaymentStatus.RETURNED,
+        failureCode: returnCode,
+        failureReason: 'ACH debit return',
+      },
+    });
+    if (returned.count !== 1) {
+      throw new BadRequestException('Payment is not settled for return.');
+    }
+    await transaction.ledgerEntry.create({
+      data: {
+        entryKey: `debit-return:${paymentId}`,
+        fundingAccountId: debitPosted.fundingAccountId,
+        paymentId,
+        entryType: LedgerEntryType.RETURN,
+        amount: debitPosted.amount,
+      },
+    });
+    const returnedPayment = await transaction.payment.findUniqueOrThrow({
+      where: { id: paymentId },
+    });
+    await transaction.outboxEvent.create({
+      data: paymentLifecycleOutboxEvent(
+        returnedPayment,
+        OutboxEventType.PAYMENT_RETURNED,
+        returnedPayment.updatedAt,
+        returnCode,
+      ),
+    });
+    return null;
   }
 
   async details(paymentId: string) {

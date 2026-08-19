@@ -200,9 +200,10 @@ export class PaymentsService {
     authenticatedMerchant: AuthenticatedMerchant,
   ) {
     await this.findOwnedPayment(id, authenticatedMerchant);
-    return this.serializeReservation(
-      await this.paymentEngine.returnSettlement(id, returnCode),
-    );
+    const returned = await this.paymentEngine.returnSettlement(id, returnCode);
+    return returned
+      ? this.serializeReservation(returned)
+      : this.findOne(id, authenticatedMerchant);
   }
 
   async details(id: string, authenticatedMerchant: AuthenticatedMerchant) {
