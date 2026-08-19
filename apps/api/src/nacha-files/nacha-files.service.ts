@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PaymentDirection, PaymentStatus } from '@prisma/client';
+import { PaymentDirection, PaymentStatus, Prisma } from '@prisma/client';
 import type { AuthenticatedMerchant } from '../auth/merchant-authentication.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ListNachaFilesQueryDto } from './dto/list-nacha-files-query.dto';
@@ -35,78 +35,117 @@ export class NachaFilesService {
     merchant: { merchantCode: string; displayName: string } | null,
   ) {
     const { start, end } = dateRange(query);
-    const files = await this.prisma.achFile.findMany({
-      where: {
-        ...(merchantId ? { companyId: merchantId } : {}),
-        ...(start && end ? { createdAt: { gte: start, lt: end } } : {}),
-        ...(query.search?.trim()
-          ? {
-              OR: [
-                { id: { contains: query.search.trim(), mode: 'insensitive' } },
-                {
-                  fileName: {
-                    contains: query.search.trim(),
-                    mode: 'insensitive',
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 25;
+    const where: Prisma.AchFileWhereInput = {
+      ...(merchantId ? { companyId: merchantId } : {}),
+      ...(start || end
+        ? {
+            createdAt: {
+              ...(start ? { gte: start } : {}),
+              ...(end ? { lt: end } : {}),
+            },
+          }
+        : {}),
+      ...fileStatusWhere(query.status),
+      ...(query.search?.trim()
+        ? {
+            OR: [
+              { id: { contains: query.search.trim(), mode: 'insensitive' } },
+              {
+                fileName: {
+                  contains: query.search.trim(),
+                  mode: 'insensitive',
+                },
+              },
+              {
+                payments: {
+                  some: {
+                    merchant: {
+                      is: {
+                        OR: [
+                          {
+                            merchantCode: {
+                              contains: query.search.trim(),
+                              mode: 'insensitive',
+                            },
+                          },
+                          {
+                            displayName: {
+                              contains: query.search.trim(),
+                              mode: 'insensitive',
+                            },
+                          },
+                        ],
+                      },
+                    },
                   },
                 },
-              ],
-            }
-          : {}),
-      },
-      include: {
-        payments: {
-          where: merchantId ? { merchantId } : {},
-          orderBy: { id: 'asc' },
-          select: {
-            id: true,
-            externalReference: true,
-            direction: true,
-            amountCents: true,
-            currency: true,
-            status: true,
-            exportedAt: true,
-            createdAt: true,
-            receiverName: true,
-            receiverAccountRef: true,
-            routingNumber: true,
-            merchant: { select: { merchantCode: true, displayName: true } },
+              },
+            ],
+          }
+        : {}),
+    };
+    const [files, total, totals, filesGeneratedToday, pendingSubmissionFiles] =
+      await this.prisma.$transaction([
+        this.prisma.achFile.findMany({
+          where,
+          include: {
+            payments: {
+              where: merchantId ? { merchantId } : {},
+              orderBy: { id: 'asc' },
+              select: {
+                id: true,
+                externalReference: true,
+                direction: true,
+                amountCents: true,
+                currency: true,
+                status: true,
+                exportedAt: true,
+                createdAt: true,
+                receiverName: true,
+                merchant: { select: { merchantCode: true, displayName: true } },
+              },
+            },
           },
-        },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    });
+          orderBy: fileOrderBy(query.sortBy, query.sortOrder ?? 'desc'),
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        }),
+        this.prisma.achFile.count({ where }),
+        this.prisma.achFile.aggregate({
+          where,
+          _sum: {
+            totalEntries: true,
+            debitTotalCents: true,
+            creditTotalCents: true,
+          },
+        }),
+        this.prisma.achFile.count({
+          where: {
+            AND: [where, { createdAt: { gte: startOfUtcDay(new Date()) } }],
+          },
+        }),
+        this.prisma.achFile.count({
+          where: { AND: [where, fileStatusWhere('PENDING')] },
+        }),
+      ]);
     const data = files.map((file) => toFileRow(file));
-    const filtered = query.status
-      ? data.filter((file) => file.submissionStatus === query.status)
-      : data;
-    const today = startOfUtcDay(new Date());
-    const summary = filtered.reduce(
-      (totals, file) => ({
-        paymentsExported: totals.paymentsExported + file.totalPayments,
-        totalExportAmountCents:
-          totals.totalExportAmountCents + BigInt(file.totalAmountCents),
-        pendingSubmissionFiles:
-          totals.pendingSubmissionFiles +
-          (file.submissionStatus === 'PENDING' ? 1 : 0),
-        filesGeneratedToday:
-          totals.filesGeneratedToday +
-          (file.createdAt >= today.toISOString() ? 1 : 0),
-      }),
-      {
-        filesGeneratedToday: 0,
-        paymentsExported: 0,
-        totalExportAmountCents: BigInt(0),
-        pendingSubmissionFiles: 0,
-      },
-    );
     return {
       merchant,
-      data: filtered,
+      data,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
       summary: {
-        filesGeneratedToday: summary.filesGeneratedToday,
-        paymentsExported: summary.paymentsExported,
-        totalExportAmountCents: summary.totalExportAmountCents.toString(),
-        pendingSubmissionFiles: summary.pendingSubmissionFiles,
+        filesGeneratedToday,
+        paymentsExported: totals._sum.totalEntries ?? 0,
+        totalExportAmountCents: (
+          (totals._sum.debitTotalCents ?? 0n) +
+          (totals._sum.creditTotalCents ?? 0n)
+        ).toString(),
+        pendingSubmissionFiles,
       },
     };
   }
@@ -159,8 +198,6 @@ function toFileRow(file: {
     exportedAt: Date | null;
     createdAt: Date;
     receiverName: string;
-    receiverAccountRef: string;
-    routingNumber: string;
     merchant: { merchantCode: string; displayName: string };
   }>;
 }) {
@@ -285,20 +322,23 @@ function dateRange(query: ListNachaFilesQueryDto): {
   start?: Date;
   end?: Date;
 } {
+  if (query.startDate || query.endDate) {
+    const start = query.startDate
+      ? startOfUtcDay(new Date(query.startDate))
+      : undefined;
+    const endDate = query.endDate
+      ? startOfUtcDay(new Date(query.endDate))
+      : undefined;
+    if (start && endDate && start > endDate)
+      throw new BadRequestException('The date range is invalid.');
+    return { start, ...(endDate ? { end: addUtcDays(endDate, 1) } : {}) };
+  }
   const range = query.dateRange ?? 'all';
   if (range === 'all') return {};
-  if (range === 'custom') {
-    if (!query.startDate || !query.endDate) {
-      throw new BadRequestException(
-        'Custom date filtering requires both startDate and endDate.',
-      );
-    }
-    const start = startOfUtcDay(new Date(query.startDate));
-    const end = addUtcDays(startOfUtcDay(new Date(query.endDate)), 1);
-    if (start >= end)
-      throw new BadRequestException('The date range is invalid.');
-    return { start, end };
-  }
+  if (range === 'custom')
+    throw new BadRequestException(
+      'Custom date filtering requires a startDate or endDate.',
+    );
   const today = startOfUtcDay(new Date());
   return range === 'today'
     ? { start: today, end: addUtcDays(today, 1) }
@@ -306,6 +346,36 @@ function dateRange(query: ListNachaFilesQueryDto): {
         start: addUtcDays(today, range === '7d' ? -6 : -29),
         end: addUtcDays(today, 1),
       };
+}
+
+function fileStatusWhere(
+  status: ListNachaFilesQueryDto['status'],
+): Prisma.AchFileWhereInput {
+  if (status === 'FAILED') return { status: 'FAILED' };
+  if (status === 'PENDING') {
+    return {
+      status: { not: 'FAILED' },
+      payments: { some: { status: PaymentStatus.VALIDATED } },
+    };
+  }
+  if (status === 'SUBMITTED') {
+    return {
+      status: { not: 'FAILED' },
+      payments: { none: { status: PaymentStatus.VALIDATED } },
+    };
+  }
+  return {};
+}
+
+function fileOrderBy(
+  sortBy: ListNachaFilesQueryDto['sortBy'],
+  sortOrder: 'asc' | 'desc',
+): Prisma.AchFileOrderByWithRelationInput[] {
+  if (sortBy === 'fileName') return [{ fileName: sortOrder }, { id: 'desc' }];
+  if (sortBy === 'totalEntries')
+    return [{ totalEntries: sortOrder }, { id: 'desc' }];
+  if (sortBy === 'status') return [{ status: sortOrder }, { id: 'desc' }];
+  return [{ createdAt: sortOrder }, { id: 'desc' }];
 }
 
 function startOfUtcDay(value: Date): Date {

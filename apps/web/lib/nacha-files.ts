@@ -34,6 +34,10 @@ export type NachaFile = {
 export type NachaFilesData = {
   merchant: { merchantCode: string; displayName: string } | null;
   data: NachaFile[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
   summary: {
     filesGeneratedToday: number;
     paymentsExported: number;
@@ -49,6 +53,7 @@ export type NachaFilesFilters = {
   dateRange: NachaDateRange;
   startDate: string;
   endDate: string;
+  page?: number;
 };
 
 export function parseNachaFilesData(value: unknown): NachaFilesData {
@@ -71,7 +76,13 @@ export function parseNachaFilesData(value: unknown): NachaFilesData {
   ) {
     throw new Error("The NACHA file summary has an invalid format.");
   }
-  return value as NachaFilesData;
+  return {
+    ...value,
+    page: typeof value.page === "number" ? value.page : 1,
+    pageSize: typeof value.pageSize === "number" ? value.pageSize : 25,
+    total: typeof value.total === "number" ? value.total : value.data.length,
+    totalPages: typeof value.totalPages === "number" ? value.totalPages : 1,
+  } as NachaFilesData;
 }
 
 export function nachaFilesSearchParams(filters: NachaFilesFilters): string {
@@ -79,10 +90,9 @@ export function nachaFilesSearchParams(filters: NachaFilesFilters): string {
   if (filters.search.trim()) params.set("search", filters.search.trim());
   if (filters.merchantId) params.set("merchantId", filters.merchantId);
   if (filters.status) params.set("status", filters.status);
-  if (filters.dateRange === "custom") {
-    if (filters.startDate) params.set("startDate", filters.startDate);
-    if (filters.endDate) params.set("endDate", filters.endDate);
-  }
+  if (filters.startDate) params.set("startDate", filters.startDate);
+  if (filters.endDate) params.set("endDate", filters.endDate);
+  if ((filters.page ?? 1) > 1) params.set("page", String(filters.page));
   return params.toString();
 }
 

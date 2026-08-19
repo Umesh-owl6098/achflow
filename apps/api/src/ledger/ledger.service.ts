@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { LedgerEntryType, ReservationStatus } from '@prisma/client';
+import { LedgerEntryType, Prisma, ReservationStatus } from '@prisma/client';
 import type { AuthenticatedMerchant } from '../auth/merchant-authentication.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ListLedgerQueryDto } from './dto/list-ledger-query.dto';
@@ -32,9 +32,88 @@ export class LedgerService {
     merchantId: string | undefined,
     merchant: { merchantCode: string; displayName: string } | null,
   ) {
+    const { start, end } = ledgerDateRange(query);
+    const minimum = query.minAmountCents ? BigInt(query.minAmountCents) : null;
+    const maximum = query.maxAmountCents ? BigInt(query.maxAmountCents) : null;
+    if (minimum !== null && maximum !== null && minimum > maximum) {
+      throw new BadRequestException('The amount range is invalid.');
+    }
+    const search = query.search?.trim();
+    const matchingPaymentIds = search
+      ? await this.prisma.payment.findMany({
+          where: {
+            ...(merchantId ? { merchantId } : {}),
+            OR: [
+              { id: { contains: search, mode: 'insensitive' } },
+              {
+                externalReference: {
+                  contains: search,
+                  mode: 'insensitive',
+                },
+              },
+            ],
+          },
+          select: { id: true },
+        })
+      : [];
+    const where: Prisma.LedgerEntryWhereInput = {
+      ...(merchantId ? { fundingAccount: { is: { merchantId } } } : {}),
+      ...(query.entryType ? { entryType: query.entryType } : {}),
+      ...(minimum !== null ? { amount: { gte: minimum } } : {}),
+      ...(maximum !== null ? { amount: { lte: maximum } } : {}),
+      ...(start || end
+        ? {
+            createdAt: {
+              ...(start ? { gte: start } : {}),
+              ...(end ? { lt: end } : {}),
+            },
+          }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              { entryKey: { contains: search, mode: 'insensitive' } },
+              { paymentId: { contains: search, mode: 'insensitive' } },
+              ...(matchingPaymentIds.length
+                ? [
+                    {
+                      paymentId: {
+                        in: matchingPaymentIds.map((payment) => payment.id),
+                      },
+                    },
+                  ]
+                : []),
+              {
+                fundingAccount: {
+                  is: {
+                    merchant: {
+                      is: {
+                        OR: [
+                          {
+                            merchantCode: {
+                              contains: search,
+                              mode: 'insensitive',
+                            },
+                          },
+                          {
+                            displayName: {
+                              contains: search,
+                              mode: 'insensitive',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
     const [entries, fundingAccounts] = await Promise.all([
       this.prisma.ledgerEntry.findMany({
-        where: merchantId ? { fundingAccount: { merchantId } } : {},
+        where,
         include: {
           fundingAccount: {
             include: {
@@ -156,33 +235,13 @@ export class LedgerService {
       };
     });
 
-    const { start, end } = ledgerDateRange(query);
-    const minimum = query.minAmountCents ? BigInt(query.minAmountCents) : null;
-    const maximum = query.maxAmountCents ? BigInt(query.maxAmountCents) : null;
-    if (minimum !== null && maximum !== null && minimum > maximum) {
-      throw new BadRequestException('The amount range is invalid.');
-    }
-    const search = query.search?.trim().toLowerCase();
-    const filteredRows = rows
-      .filter((row) => {
-        const timestamp = new Date(row.createdAt);
-        const amount = BigInt(row.amountCents);
-        if (query.entryType && row.entryType !== query.entryType) return false;
-        if (start && end && (timestamp < start || timestamp >= end))
-          return false;
-        if (minimum !== null && amount < minimum) return false;
-        if (maximum !== null && amount > maximum) return false;
-        if (!search) return true;
-        return [
-          row.payment?.id,
-          row.payment?.externalReference,
-          row.merchant.merchantCode,
-          row.merchant.displayName,
-        ].some((value) => value?.toLowerCase().includes(search));
-      })
-      .reverse();
+    const sortedRows = sortLedgerRows(
+      rows,
+      query.sortBy,
+      query.sortOrder ?? 'desc',
+    );
 
-    const summary = filteredRows.reduce(
+    const summary = sortedRows.reduce(
       (totals, row) => ({
         creditTotalCents:
           totals.creditTotalCents + BigInt(row.creditAmountCents),
@@ -191,9 +250,16 @@ export class LedgerService {
       { creditTotalCents: BigInt(0), debitTotalCents: BigInt(0) },
     );
 
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 25;
+    const total = sortedRows.length;
     return {
       merchant,
-      data: filteredRows,
+      data: sortedRows.slice((page - 1) * pageSize, page * pageSize),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
       summary: {
         totalCreditsCents: summary.creditTotalCents.toString(),
         totalDebitsCents: summary.debitTotalCents.toString(),
@@ -218,26 +284,61 @@ function ledgerDateRange(query: ListLedgerQueryDto): {
   start?: Date;
   end?: Date;
 } {
+  if (query.startDate || query.endDate) {
+    const start = query.startDate
+      ? startOfUtcDay(new Date(query.startDate))
+      : undefined;
+    const endDate = query.endDate
+      ? startOfUtcDay(new Date(query.endDate))
+      : undefined;
+    if (start && endDate && start > endDate)
+      throw new BadRequestException('The date range is invalid.');
+    return { start, ...(endDate ? { end: addUtcDays(endDate, 1) } : {}) };
+  }
   const dateRange = query.dateRange ?? 'all';
   if (dateRange === 'all') return {};
-  if (dateRange === 'custom') {
-    if (!query.startDate || !query.endDate) {
-      throw new BadRequestException(
-        'Custom date filtering requires both startDate and endDate.',
-      );
-    }
-    const start = startOfUtcDay(new Date(query.startDate));
-    const end = addUtcDays(startOfUtcDay(new Date(query.endDate)), 1);
-    if (start >= end)
-      throw new BadRequestException('The date range is invalid.');
-    return { start, end };
-  }
+  if (dateRange === 'custom')
+    throw new BadRequestException(
+      'Custom date filtering requires a startDate or endDate.',
+    );
   const today = startOfUtcDay(new Date());
   if (dateRange === 'today') return { start: today, end: addUtcDays(today, 1) };
   return {
     start: addUtcDays(today, dateRange === '7d' ? -6 : -29),
     end: addUtcDays(today, 1),
   };
+}
+
+function sortLedgerRows<
+  T extends {
+    createdAt: string;
+    amountCents: string;
+    entryType: string;
+    merchant: { merchantCode: string };
+  },
+>(
+  rows: T[],
+  sortBy: ListLedgerQueryDto['sortBy'],
+  sortOrder: 'asc' | 'desc',
+): T[] {
+  const direction = sortOrder === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const compare =
+      sortBy === 'amountCents'
+        ? BigInt(left.amountCents) < BigInt(right.amountCents)
+          ? -1
+          : BigInt(left.amountCents) > BigInt(right.amountCents)
+            ? 1
+            : 0
+        : sortBy === 'entryType'
+          ? left.entryType.localeCompare(right.entryType)
+          : sortBy === 'merchant'
+            ? left.merchant.merchantCode.localeCompare(
+                right.merchant.merchantCode,
+              )
+            : left.createdAt.localeCompare(right.createdAt);
+    return compare * direction;
+  });
 }
 
 function startOfUtcDay(date: Date): Date {

@@ -37,8 +37,8 @@ export class ListPaymentsQueryDto {
   endDate?: string;
 
   @IsOptional()
-  @IsIn(['createdAt', 'amountCents', 'status'])
-  sortBy?: 'createdAt' | 'amountCents' | 'status';
+  @IsIn(['createdAt', 'updatedAt', 'amountCents', 'status'])
+  sortBy?: 'createdAt' | 'updatedAt' | 'amountCents' | 'status';
 
   @IsOptional()
   @IsIn(['asc', 'desc'])
@@ -56,4 +56,11 @@ export class ListPaymentsQueryDto {
   @Min(1)
   @Max(25)
   limit?: number;
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(10)
+  @Max(100)
+  pageSize?: number;
 }

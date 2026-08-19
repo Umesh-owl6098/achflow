@@ -36,7 +36,12 @@ type Event = {
   merchant: { merchantCode: string; displayName: string };
   payload: unknown;
 };
-type Data = { data: Event[] };
+type Data = {
+  data: Event[];
+  page?: number;
+  total?: number;
+  totalPages?: number;
+};
 async function load(query: string) {
   const r = await fetch(`/api/webhooks/deliveries?${query}`, {
     headers: { Accept: "application/json" },
@@ -54,6 +59,7 @@ export function WebhookEventsTable({
   const [status, setStatus] = useState("all");
   const [type, setType] = useState("");
   const [date, setDate] = useState("30d");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Event | null>(null);
   const params = new URLSearchParams({
     search: useDeferredValue(search),
@@ -61,6 +67,7 @@ export function WebhookEventsTable({
     eventType: type,
     dateRange: date,
   });
+  if (page > 1) params.set("page", String(page));
   const q = useQuery({
     queryKey: ["webhook-events", params.toString()],
     queryFn: () => load(params.toString()),
@@ -87,13 +94,25 @@ export function WebhookEventsTable({
       ) : null}
       <Filters
         search={search}
-        setSearch={setSearch}
+        setSearch={(value) => {
+          setPage(1);
+          setSearch(value);
+        }}
         status={status}
-        setStatus={setStatus}
+        setStatus={(value) => {
+          setPage(1);
+          setStatus(value);
+        }}
         type={type}
-        setType={setType}
+        setType={(value) => {
+          setPage(1);
+          setType(value);
+        }}
         date={date}
-        setDate={setDate}
+        setDate={(value) => {
+          setPage(1);
+          setDate(value);
+        }}
       />
       {events.length === 0 ? (
         <EmptyState
@@ -148,6 +167,32 @@ export function WebhookEventsTable({
           </table>
         </section>
       )}
+      {(q.data?.totalPages ?? 1) > 1 ? (
+        <div className="flex items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
+          <span>{q.data?.total ?? events.length} events</span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => current - 1)}
+            >
+              Previous
+            </Button>
+            <span>
+              Page {q.data?.page ?? page} of {q.data?.totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= (q.data?.totalPages ?? 1)}
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      ) : null}
       <EventDrawer event={selected} onClose={() => setSelected(null)} />
     </div>
   );

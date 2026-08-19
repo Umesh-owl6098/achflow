@@ -35,6 +35,7 @@ const initialFilters: NachaFilesFilters = {
   dateRange: "all",
   startDate: "",
   endDate: "",
+  page: 1,
 };
 
 async function loadNachaFiles(
@@ -102,7 +103,11 @@ export function NachaFilesTable() {
     queryFn: loadMerchants,
   });
   const updateFilters = (update: Partial<NachaFilesFilters>) =>
-    setFilters((current) => ({ ...current, ...update }));
+    setFilters((current) => ({
+      ...current,
+      ...update,
+      page: update.page ?? 1,
+    }));
 
   if (query.isLoading) return <NachaFilesSkeleton />;
   if (query.isError)
@@ -319,6 +324,12 @@ export function NachaFilesTable() {
           </div>
         </section>
       )}
+      <Pagination
+        page={data.page}
+        totalPages={data.totalPages}
+        total={data.total}
+        onPageChange={(page) => updateFilters({ page })}
+      />
       <NachaFileDetails
         file={selected}
         onClose={() => setSelected(null)}
@@ -329,6 +340,46 @@ export function NachaFilesTable() {
           window.setTimeout(() => setCopied(null), 1600);
         }}
       />
+    </div>
+  );
+}
+
+function Pagination({
+  page,
+  totalPages,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
+      <span>{total} files</span>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          Previous
+        </Button>
+        <span>
+          Page {page} of {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </Button>
+      </div>
     </div>
   );
 }

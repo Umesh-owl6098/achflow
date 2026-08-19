@@ -39,6 +39,7 @@ const initialFilters: LedgerFilters = {
   endDate: "",
   minAmount: "",
   maxAmount: "",
+  page: 1,
 };
 
 async function loadLedger(filters: LedgerFilters): Promise<LedgerData> {
@@ -106,7 +107,11 @@ export function LedgerTable() {
   });
 
   function updateFilters(update: Partial<LedgerFilters>) {
-    setFilters((current) => ({ ...current, ...update }));
+    setFilters((current) => ({
+      ...current,
+      ...update,
+      page: update.page ?? 1,
+    }));
   }
 
   if (query.isLoading) return <LedgerSkeleton />;
@@ -330,6 +335,12 @@ export function LedgerTable() {
           </div>
         </section>
       )}
+      <Pagination
+        page={data.page}
+        totalPages={data.totalPages}
+        total={data.total}
+        onPageChange={(page) => updateFilters({ page })}
+      />
       <LedgerDetailPanel
         row={selected}
         history={data.data.filter(
@@ -337,6 +348,46 @@ export function LedgerTable() {
         )}
         onClose={() => setSelected(null)}
       />
+    </div>
+  );
+}
+
+function Pagination({
+  page,
+  totalPages,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
+      <span>{total} entries</span>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          Previous
+        </Button>
+        <span>
+          Page {page} of {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </Button>
+      </div>
     </div>
   );
 }

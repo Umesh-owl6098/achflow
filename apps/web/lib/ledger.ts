@@ -9,6 +9,7 @@ export type LedgerFilters = {
   endDate: string;
   minAmount: string;
   maxAmount: string;
+  page?: number;
 };
 
 export type LedgerRow = {
@@ -47,6 +48,10 @@ export type LedgerRow = {
 export type LedgerData = {
   merchant: { merchantCode: string; displayName: string } | null;
   data: LedgerRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
   summary: {
     totalCreditsCents: string;
     totalDebitsCents: string;
@@ -87,7 +92,13 @@ export function parseLedgerData(value: unknown): LedgerData {
   ) {
     throw new Error("The ledger summary has an invalid format.");
   }
-  return value as LedgerData;
+  return {
+    ...value,
+    page: typeof value.page === "number" ? value.page : 1,
+    pageSize: typeof value.pageSize === "number" ? value.pageSize : 25,
+    total: typeof value.total === "number" ? value.total : value.data.length,
+    totalPages: typeof value.totalPages === "number" ? value.totalPages : 1,
+  } as LedgerData;
 }
 
 export function ledgerSearchParams(filters: LedgerFilters): string {
@@ -95,14 +106,13 @@ export function ledgerSearchParams(filters: LedgerFilters): string {
   if (filters.search.trim()) params.set("search", filters.search.trim());
   if (filters.merchantId) params.set("merchantId", filters.merchantId);
   if (filters.entryType) params.set("entryType", filters.entryType);
-  if (filters.dateRange === "custom") {
-    if (filters.startDate) params.set("startDate", filters.startDate);
-    if (filters.endDate) params.set("endDate", filters.endDate);
-  }
+  if (filters.startDate) params.set("startDate", filters.startDate);
+  if (filters.endDate) params.set("endDate", filters.endDate);
   const minimum = dollarsToCents(filters.minAmount);
   const maximum = dollarsToCents(filters.maxAmount);
   if (minimum !== null) params.set("minAmountCents", minimum);
   if (maximum !== null) params.set("maxAmountCents", maximum);
+  if ((filters.page ?? 1) > 1) params.set("page", String(filters.page));
   return params.toString();
 }
 

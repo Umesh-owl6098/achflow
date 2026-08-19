@@ -3,10 +3,13 @@ import {
   IsDateString,
   IsEnum,
   IsIn,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
   Matches,
+  Max,
+  Min,
 } from 'class-validator';
 import { LedgerEntryType } from '@prisma/client';
 
@@ -44,4 +47,25 @@ export class ListLedgerQueryDto {
   @Transform(({ value }) => String(value))
   @Matches(/^\d+$/)
   maxAmountCents?: string;
+
+  @IsOptional()
+  @IsIn(['createdAt', 'amountCents', 'entryType', 'merchant'])
+  sortBy?: 'createdAt' | 'amountCents' | 'entryType' | 'merchant';
+
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  sortOrder?: 'asc' | 'desc';
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(10)
+  @Max(100)
+  pageSize?: number;
 }

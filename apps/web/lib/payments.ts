@@ -79,10 +79,8 @@ export function paymentListSearchParams(filters: PaymentListFilters): string {
   if (filters.search) params.set("search", filters.search);
   if (filters.status) params.set("status", filters.status);
   if (filters.direction) params.set("direction", filters.direction);
-  if (filters.dateRange === "custom") {
-    if (filters.startDate) params.set("startDate", filters.startDate);
-    if (filters.endDate) params.set("endDate", filters.endDate);
-  }
+  if (filters.startDate) params.set("startDate", filters.startDate);
+  if (filters.endDate) params.set("endDate", filters.endDate);
   return params.toString();
 }
 

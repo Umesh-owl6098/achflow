@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { OutboxEventType } from '@prisma/client';
+import { OutboxEventType, Prisma } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import type { AuthenticatedMerchant } from '../auth/merchant-authentication.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -166,38 +166,43 @@ export class MerchantWebhookEndpointsService {
     endpointId: string,
     query: ListWebhookDeliveriesQueryDto,
   ) {
-    const data = await this.prisma.webhookDelivery.findMany({
-      where: {
-        webhookEndpointId: endpointId,
-        ...(query.status && query.status !== 'all'
-          ? { status: query.status }
-          : {}),
-        ...(query.search?.trim()
-          ? {
-              OR: [
-                {
-                  eventId: {
-                    contains: query.search.trim(),
-                    mode: 'insensitive',
-                  },
-                },
-                {
-                  eventType: {
-                    contains: query.search.trim(),
-                    mode: 'insensitive',
-                  },
-                },
-              ],
-            }
-          : {}),
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    });
+    const { start, end } = deliveryDateRange(query);
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 25;
+    const where: Prisma.WebhookDeliveryWhereInput = {
+      webhookEndpointId: endpointId,
+      ...(query.status && query.status !== 'all'
+        ? { status: query.status }
+        : {}),
+      ...(query.eventType?.trim() ? { eventType: query.eventType.trim() } : {}),
+      ...(start || end
+        ? {
+            createdAt: {
+              ...(start ? { gte: start } : {}),
+              ...(end ? { lt: end } : {}),
+            },
+          }
+        : {}),
+      ...deliverySearchWhere(query.search),
+    };
+    const [deliveries, total] = await this.prisma.$transaction([
+      this.prisma.webhookDelivery.findMany({
+        where,
+        orderBy: deliveryOrderBy(query.sortBy, query.sortOrder ?? 'desc'),
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.webhookDelivery.count({ where }),
+    ]);
     return {
-      data: data.map((delivery) => ({
+      data: deliveries.map((delivery) => ({
         ...delivery,
         payload: delivery.payload,
       })),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
     };
   }
 
@@ -216,60 +221,68 @@ export class MerchantWebhookEndpointsService {
     query: ListWebhookDeliveriesQueryDto,
     merchantId?: string,
   ) {
-    const start = deliveryStart(query.dateRange);
-    const deliveries = await this.prisma.webhookDelivery.findMany({
-      where: {
-        ...(merchantId ? { merchantId } : {}),
-        ...(query.status && query.status !== 'all'
-          ? { status: query.status }
-          : {}),
-        ...(query.eventType?.trim()
-          ? { eventType: query.eventType.trim() }
-          : {}),
-        ...(start ? { createdAt: { gte: start } } : {}),
-      },
-      include: {
-        webhookEndpoint: { select: { id: true, url: true } },
-        merchant: { select: { merchantCode: true, displayName: true } },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    const { start, end } = deliveryDateRange(query);
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 25;
+    const where: Prisma.WebhookDeliveryWhereInput = {
+      ...(merchantId ? { merchantId } : {}),
+      ...(query.status && query.status !== 'all'
+        ? { status: query.status }
+        : {}),
+      ...(query.eventType?.trim() ? { eventType: query.eventType.trim() } : {}),
+      ...(start || end
+        ? {
+            createdAt: {
+              ...(start ? { gte: start } : {}),
+              ...(end ? { lt: end } : {}),
+            },
+          }
+        : {}),
+      ...deliverySearchWhere(query.search),
+    };
+    const [deliveries, total] = await this.prisma.$transaction([
+      this.prisma.webhookDelivery.findMany({
+        where,
+        include: {
+          webhookEndpoint: { select: { id: true, url: true } },
+          merchant: { select: { merchantCode: true, displayName: true } },
+        },
+        orderBy: deliveryOrderBy(query.sortBy, query.sortOrder ?? 'desc'),
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.webhookDelivery.count({ where }),
+    ]);
+    const data = deliveries.map((delivery) => {
+      const payload = delivery.payload as { data?: { paymentId?: unknown } };
+      return {
+        id: delivery.id,
+        eventId: delivery.eventId,
+        eventType: delivery.eventType,
+        paymentId:
+          typeof payload.data?.paymentId === 'string'
+            ? payload.data.paymentId
+            : null,
+        status: delivery.status,
+        attemptCount: delivery.attemptCount,
+        responseStatus: delivery.responseStatus,
+        lastErrorCode: delivery.lastErrorCode,
+        nextAttemptAt: delivery.nextAttemptAt?.toISOString() ?? null,
+        deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
+        createdAt: delivery.createdAt.toISOString(),
+        lastAttemptAt: delivery.lastAttemptAt?.toISOString() ?? null,
+        endpoint: delivery.webhookEndpoint,
+        merchant: delivery.merchant,
+        payload: delivery.payload,
+      };
     });
-    const search = query.search?.trim().toLowerCase();
-    const data = deliveries
-      .filter((delivery) => {
-        if (!search) return true;
-        const payload = delivery.payload as { data?: { paymentId?: unknown } };
-        return (
-          delivery.eventId.toLowerCase().includes(search) ||
-          delivery.eventType.toLowerCase().includes(search) ||
-          (typeof payload.data?.paymentId === 'string' &&
-            payload.data.paymentId.toLowerCase().includes(search))
-        );
-      })
-      .map((delivery) => {
-        const payload = delivery.payload as { data?: { paymentId?: unknown } };
-        return {
-          id: delivery.id,
-          eventId: delivery.eventId,
-          eventType: delivery.eventType,
-          paymentId:
-            typeof payload.data?.paymentId === 'string'
-              ? payload.data.paymentId
-              : null,
-          status: delivery.status,
-          attemptCount: delivery.attemptCount,
-          responseStatus: delivery.responseStatus,
-          lastErrorCode: delivery.lastErrorCode,
-          nextAttemptAt: delivery.nextAttemptAt?.toISOString() ?? null,
-          deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
-          createdAt: delivery.createdAt.toISOString(),
-          lastAttemptAt: delivery.lastAttemptAt?.toISOString() ?? null,
-          endpoint: delivery.webhookEndpoint,
-          merchant: delivery.merchant,
-          payload: delivery.payload,
-        };
-      });
-    return { data };
+    return {
+      data,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    };
   }
 
   async enqueueTest(endpointId: string, merchant: AuthenticatedMerchant) {
@@ -378,13 +391,94 @@ export class MerchantWebhookEndpointsService {
   }
 }
 
-function deliveryStart(range: ListWebhookDeliveriesQueryDto['dateRange']) {
-  if (!range || range === 'all') return undefined;
+function deliveryDateRange(query: ListWebhookDeliveriesQueryDto): {
+  start?: Date;
+  end?: Date;
+} {
+  if (query.startDate || query.endDate) {
+    const start = query.startDate
+      ? startOfUtcDay(new Date(query.startDate))
+      : undefined;
+    const endDate = query.endDate
+      ? startOfUtcDay(new Date(query.endDate))
+      : undefined;
+    if (start && endDate && start > endDate)
+      throw new BadRequestException('The date range is invalid.');
+    return { start, ...(endDate ? { end: addUtcDays(endDate, 1) } : {}) };
+  }
+  const range = query.dateRange;
+  if (!range || range === 'all') return {};
+  if (range === 'custom')
+    throw new BadRequestException(
+      'Custom date filtering requires a startDate or endDate.',
+    );
   const now = new Date();
   if (range === 'today')
-    return new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
+    return {
+      start: startOfUtcDay(now),
+      end: addUtcDays(startOfUtcDay(now), 1),
+    };
   const days = range === '7d' ? 7 : 30;
-  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  return {
+    start: new Date(now.getTime() - days * 24 * 60 * 60 * 1000),
+    end: now,
+  };
+}
+
+function deliverySearchWhere(
+  search: string | undefined,
+): Prisma.WebhookDeliveryWhereInput {
+  const value = search?.trim();
+  if (!value) return {};
+  return {
+    OR: [
+      { eventId: { contains: value, mode: 'insensitive' } },
+      { eventType: { contains: value, mode: 'insensitive' } },
+      {
+        payload: {
+          path: ['data', 'paymentId'],
+          string_contains: value,
+        },
+      },
+      {
+        webhookEndpoint: {
+          is: { url: { contains: value, mode: 'insensitive' } },
+        },
+      },
+      {
+        merchant: {
+          is: {
+            OR: [
+              { merchantCode: { contains: value, mode: 'insensitive' } },
+              { displayName: { contains: value, mode: 'insensitive' } },
+            ],
+          },
+        },
+      },
+    ],
+  };
+}
+
+function deliveryOrderBy(
+  sortBy: ListWebhookDeliveriesQueryDto['sortBy'],
+  sortOrder: 'asc' | 'desc',
+): Prisma.WebhookDeliveryOrderByWithRelationInput[] {
+  if (sortBy === 'deliveredAt')
+    return [{ deliveredAt: sortOrder }, { id: 'desc' }];
+  if (sortBy === 'attemptCount')
+    return [{ attemptCount: sortOrder }, { id: 'desc' }];
+  if (sortBy === 'status') return [{ status: sortOrder }, { id: 'desc' }];
+  return [{ createdAt: sortOrder }, { id: 'desc' }];
+}
+
+function startOfUtcDay(value: Date): Date {
+  return new Date(
+    Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()),
+  );
+}
+
+function addUtcDays(value: Date, days: number): Date {
+  const result = new Date(value);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result;
 }

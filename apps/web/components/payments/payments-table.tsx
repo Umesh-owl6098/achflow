@@ -69,10 +69,6 @@ export function PaymentsTable() {
   const queryFilters = {
     ...filters,
     search: debouncedSearch,
-    ...(filters.dateRange === "custom" &&
-    (!filters.startDate || !filters.endDate)
-      ? { dateRange: "30d" as const }
-      : {}),
   };
   const query = useQuery({
     queryKey: ["payments", queryFilters],

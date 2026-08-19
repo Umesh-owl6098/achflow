@@ -775,6 +775,100 @@ describe('Payments idempotency (integration)', () => {
     expect(Object.values(PaymentStatus)).toContain(listBody.data[0].status);
   });
 
+  it('supports bounded, case-insensitive payment queries without crossing merchant scope', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .set('Idempotency-Key', 'query-capability-one')
+      .set('Authorization', bearer(testBothApiKey))
+      .send({
+        ...paymentPayload,
+        amountCents: 6_000,
+        externalReference: 'Query-Reference-ONE',
+        description: 'Quarterly Acme Settlement',
+        receiverName: 'Acme Receiver',
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post('/api/v1/payments')
+      .set('Idempotency-Key', 'query-capability-two')
+      .set('Authorization', bearer(testCreditApiKey))
+      .send({
+        ...paymentPayload,
+        merchantCode: 'TEST_CREDIT',
+        amountCents: 5_000,
+        externalReference: 'other-merchant-reference',
+      })
+      .expect(201);
+
+    const search = await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ search: 'quarterly acme', page: 1, pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    expect((search.body as PaymentListResponse).total).toBe(1);
+
+    const ascending = await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ sortBy: 'amountCents', sortOrder: 'asc', page: 1, pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200);
+    const ascendingBody = ascending.body as PaymentListResponse & {
+      pageSize: number;
+    };
+    expect(ascendingBody.pageSize).toBe(10);
+    expect(ascendingBody.data[0]?.amountCents).toBe('6000');
+
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ startDate: '2099-01-01', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200)
+      .expect(({ body }: { body: PaymentListResponse }) => {
+        expect(body.total).toBe(0);
+      });
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ endDate: '2000-01-01', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200)
+      .expect(({ body }: { body: PaymentListResponse }) => {
+        expect(body.total).toBe(0);
+      });
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ startDate: '2000-01-01', endDate: '2099-01-01', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(200)
+      .expect(({ body }: { body: PaymentListResponse }) => {
+        expect(body.total).toBe(1);
+      });
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ startDate: '2026-12-31', endDate: '2026-01-01', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ startDate: 'not-a-date', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ page: 0, pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ pageSize: 101 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/api/v1/payments')
+      .query({ sortBy: 'unapprovedField', pageSize: 10 })
+      .set('Authorization', bearer(testBothApiKey))
+      .expect(400);
+  });
+
   it('returns merchant-scoped ledger entries, summaries, and read-only filters', async () => {
     const merchant = await prisma.merchant.findUniqueOrThrow({
       where: { merchantCode: 'TEST_BOTH' },

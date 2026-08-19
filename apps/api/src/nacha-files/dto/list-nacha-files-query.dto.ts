@@ -1,4 +1,15 @@
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import {
+  IsDateString,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 export class ListNachaFilesQueryDto {
   @IsOptional()
@@ -19,10 +30,31 @@ export class ListNachaFilesQueryDto {
   dateRange?: 'all' | 'today' | '7d' | '30d' | 'custom';
 
   @IsOptional()
-  @IsString()
+  @IsDateString()
   startDate?: string;
 
   @IsOptional()
-  @IsString()
+  @IsDateString()
   endDate?: string;
+
+  @IsOptional()
+  @IsIn(['createdAt', 'fileName', 'totalEntries', 'status'])
+  sortBy?: 'createdAt' | 'fileName' | 'totalEntries' | 'status';
+
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  sortOrder?: 'asc' | 'desc';
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(10)
+  @Max(100)
+  pageSize?: number;
 }

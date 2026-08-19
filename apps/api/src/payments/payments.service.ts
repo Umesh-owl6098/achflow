@@ -119,18 +119,27 @@ export class PaymentsService {
 
   private async listForScope(query: ListPaymentsQueryDto, merchantId?: string) {
     const page = query.page ?? 1;
-    const limit = query.limit ?? 25;
+    const pageSize = query.pageSize ?? query.limit ?? 25;
     const { start, end } = paymentDateRange(query);
     const search = query.search?.trim();
     const where: Prisma.PaymentWhereInput = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.direction ? { direction: query.direction } : {}),
-      ...(start && end ? { createdAt: { gte: start, lt: end } } : {}),
+      ...(start || end
+        ? {
+            createdAt: {
+              ...(start ? { gte: start } : {}),
+              ...(end ? { lt: end } : {}),
+            },
+          }
+        : {}),
       ...(search
         ? {
             OR: [
               { id: { contains: search, mode: 'insensitive' } },
               { externalReference: { contains: search, mode: 'insensitive' } },
+              { description: { contains: search, mode: 'insensitive' } },
+              { receiverName: { contains: search, mode: 'insensitive' } },
               {
                 merchant: {
                   is: {
@@ -149,29 +158,30 @@ export class PaymentsService {
           }
         : {}),
     };
-    const sortBy = query.sortBy ?? 'createdAt';
+    const sortBy = paymentSortBy(query.sortBy);
     const sortOrder = query.sortOrder ?? 'desc';
     const [payments, total] = merchantId
       ? await this.paymentsRepository.listForMerchant({
           merchantId,
           where,
           orderBy: { [sortBy]: sortOrder },
-          skip: (page - 1) * limit,
-          take: limit,
+          skip: (page - 1) * pageSize,
+          take: pageSize,
         })
       : await this.paymentsRepository.listForAdmin({
           where,
           orderBy: { [sortBy]: sortOrder },
-          skip: (page - 1) * limit,
-          take: limit,
+          skip: (page - 1) * pageSize,
+          take: pageSize,
         });
 
     return {
       data: payments.map(serializePaymentListItem),
       page,
-      limit,
+      limit: pageSize,
+      pageSize,
       total,
-      totalPages: Math.ceil(total / limit),
+      totalPages: Math.ceil(total / pageSize),
     };
   }
 
@@ -308,19 +318,23 @@ function paymentDateRange(query: ListPaymentsQueryDto): {
   start?: Date;
   end?: Date;
 } {
+  if (query.startDate || query.endDate) {
+    const start = query.startDate
+      ? startOfUtcDay(new Date(query.startDate))
+      : undefined;
+    const endDate = query.endDate
+      ? startOfUtcDay(new Date(query.endDate))
+      : undefined;
+    if (start && endDate && start > endDate) {
+      throw new BadRequestException('The date range is invalid.');
+    }
+    return { start, ...(endDate ? { end: addUtcDays(endDate, 1) } : {}) };
+  }
   const dateRange = query.dateRange ?? '30d';
   if (dateRange === 'custom') {
-    if (!query.startDate || !query.endDate) {
-      throw new BadRequestException(
-        'Custom date filtering requires both startDate and endDate.',
-      );
-    }
-    const start = startOfUtcDay(new Date(query.startDate));
-    const end = addUtcDays(startOfUtcDay(new Date(query.endDate)), 1);
-    if (start >= end) {
-      throw new BadRequestException('The custom date range is invalid.');
-    }
-    return { start, end };
+    throw new BadRequestException(
+      'Custom date filtering requires a startDate or endDate.',
+    );
   }
   const today = startOfUtcDay(new Date());
   if (dateRange === 'today') return { start: today, end: addUtcDays(today, 1) };
@@ -328,6 +342,19 @@ function paymentDateRange(query: ListPaymentsQueryDto): {
     start: addUtcDays(today, dateRange === '7d' ? -6 : -29),
     end: addUtcDays(today, 1),
   };
+}
+
+function paymentSortBy(
+  sortBy: ListPaymentsQueryDto['sortBy'],
+): 'createdAt' | 'updatedAt' | 'amountCents' | 'status' {
+  if (
+    sortBy === 'updatedAt' ||
+    sortBy === 'amountCents' ||
+    sortBy === 'status'
+  ) {
+    return sortBy;
+  }
+  return 'createdAt';
 }
 
 function startOfUtcDay(date: Date): Date {
