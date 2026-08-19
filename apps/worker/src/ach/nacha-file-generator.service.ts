@@ -4,6 +4,7 @@ import {
   OutboxEventType,
   PaymentDirection,
   PaymentStatus,
+  Prisma,
 } from '@prisma/client';
 import { WorkerPrismaService } from '../worker-prisma.service';
 import { paymentLifecycleOutboxEvent } from '../../../api/prisma/payment-lifecycle-event.factory';
@@ -47,6 +48,9 @@ export class NachaFileGeneratorService {
       ),
     );
     return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`achflow:nacha-generation`}, 0))`,
+      );
       const firstEligible = await tx.payment.findFirst({
         where: {
           status: PaymentStatus.VALIDATED,

@@ -24,6 +24,7 @@ import { WebhookSecretCryptoService } from '../../api/src/webhooks/webhook-secre
 import { createHash, createHmac } from 'crypto';
 import { createServer } from 'http';
 import { NachaFileGeneratorService } from '../src/ach/nacha-file-generator.service';
+import { NachaGenerationSchedulerService } from '../src/ach/nacha-generation-scheduler.service';
 
 function paymentPayload(paymentId: string) {
   return {
@@ -7336,5 +7337,113 @@ describe('Outbox worker (integration)', () => {
           payment.achFileId !== null,
       ),
     ).toBe(true);
+  });
+
+  it('schedules merchant-separated NACHA generation exactly once across worker instances', async () => {
+    const date = new Date('2026-07-30T00:00:00.000Z');
+    const schedulerConfig = new WorkerConfigService({
+      ...process.env,
+      NACHA_GENERATION_ENABLED: 'true',
+      NACHA_GENERATION_INTERVAL_MS: '300000',
+    });
+    const schedulerOne = new NachaGenerationSchedulerService(
+      new NachaFileGeneratorService(prismaOne),
+      schedulerConfig,
+    );
+    const schedulerTwo = new NachaGenerationSchedulerService(
+      new NachaFileGeneratorService(prismaTwo),
+      schedulerConfig,
+    );
+
+    await expect(schedulerOne.processOnce()).resolves.toEqual({
+      status: 'COMPLETED',
+      fileCount: 0,
+      paymentCount: 0,
+    });
+    expect(await prismaOne.achFile.count()).toBe(0);
+
+    await prismaOne.merchant.create({
+      data: {
+        id: 'merchant-2',
+        merchantCode: 'WORKER_TWO',
+        legalName: 'Worker Two LLC',
+        displayName: 'Worker Two',
+        status: MerchantStatus.ACTIVE,
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: BigInt(10000),
+        dailyAmountLimit: BigInt(100000),
+      },
+    });
+    await prismaOne.payment.createMany({
+      data: [
+        {
+          id: 'scheduled-merchant-one-export',
+          merchantId: 'merchant-1',
+          idempotencyKey: 'scheduled-merchant-one-key',
+          requestFingerprint: 'scheduled-merchant-one-fingerprint',
+          direction: PaymentDirection.DEBIT,
+          amountCents: BigInt(1200),
+          currency: 'USD',
+          receiverName: 'Merchant One Receiver',
+          receiverAccountRef: 'merchant-one-account',
+          routingNumber: '021000021',
+          status: PaymentStatus.VALIDATED,
+          validatedAt: date,
+        },
+        {
+          id: 'scheduled-merchant-two-export',
+          merchantId: 'merchant-2',
+          idempotencyKey: 'scheduled-merchant-two-key',
+          requestFingerprint: 'scheduled-merchant-two-fingerprint',
+          direction: PaymentDirection.CREDIT,
+          amountCents: BigInt(3400),
+          currency: 'USD',
+          receiverName: 'Merchant Two Receiver',
+          receiverAccountRef: 'merchant-two-account',
+          routingNumber: '031000503',
+          status: PaymentStatus.VALIDATED,
+          validatedAt: date,
+        },
+      ],
+    });
+
+    const [first, second] = await Promise.all([
+      schedulerOne.processOnce(),
+      schedulerTwo.processOnce(),
+    ]);
+    expect(first.fileCount + second.fileCount).toBe(2);
+    expect(first.paymentCount + second.paymentCount).toBe(2);
+
+    await expect(schedulerOne.processOnce()).resolves.toEqual({
+      status: 'COMPLETED',
+      fileCount: 0,
+      paymentCount: 0,
+    });
+    const files = await prismaOne.achFile.findMany({
+      include: { payments: { orderBy: { id: 'asc' } } },
+      orderBy: { companyId: 'asc' },
+    });
+    expect(files).toHaveLength(2);
+    expect(
+      files.map((file) => ({
+        companyId: file.companyId,
+        payments: file.payments.map((payment) => payment.id),
+      })),
+    ).toEqual([
+      {
+        companyId: 'merchant-1',
+        payments: ['scheduled-merchant-one-export'],
+      },
+      {
+        companyId: 'merchant-2',
+        payments: ['scheduled-merchant-two-export'],
+      },
+    ]);
+    expect(
+      await prismaOne.payment.count({
+        where: { status: PaymentStatus.SUBMITTED, exportedAt: { not: null } },
+      }),
+    ).toBe(2);
   });
 });

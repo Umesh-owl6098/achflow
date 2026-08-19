@@ -9,6 +9,7 @@ import { WorkerPrismaService } from './worker-prisma.service';
 import { WebhookDeliveryMaterializerService } from './webhooks/webhook-delivery-materializer.service';
 import { WebhookDeliveryProcessorService } from './webhooks/webhook-delivery-processor.service';
 import { NachaFileGeneratorService } from './ach/nacha-file-generator.service';
+import { NachaGenerationSchedulerService } from './ach/nacha-generation-scheduler.service';
 
 @Module({
   providers: [
@@ -22,6 +23,7 @@ import { NachaFileGeneratorService } from './ach/nacha-file-generator.service';
     WebhookDeliveryMaterializerService,
     WebhookDeliveryProcessorService,
     NachaFileGeneratorService,
+    NachaGenerationSchedulerService,
   ],
 })
 export class AppModule {}
