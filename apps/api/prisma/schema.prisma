@@ -96,8 +96,8 @@ model Merchant {
   status             MerchantStatus             @default(ACTIVE)
   allowAchDebit      Boolean                    @default(false)
   allowAchCredit     Boolean                    @default(false)
-  perPaymentLimit    BigInt
-  dailyAmountLimit   BigInt
+  perPaymentLimit    BigInt                     @default(10000)
+  dailyAmountLimit   BigInt                     @default(100000)
   createdAt          DateTime                   @default(now())
   updatedAt          DateTime                   @updatedAt
   payments           Payment[]

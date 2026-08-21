@@ -71,8 +71,12 @@ export class AdminMerchantsService {
             legalName: dto.legalName,
             displayName: dto.displayName,
             status: dto.status,
-            perPaymentLimit: BigInt(dto.perPaymentLimit),
-            dailyAmountLimit: BigInt(dto.dailyAmountLimit),
+            ...(dto.perPaymentLimit
+              ? { perPaymentLimit: BigInt(dto.perPaymentLimit) }
+              : {}),
+            ...(dto.dailyAmountLimit
+              ? { dailyAmountLimit: BigInt(dto.dailyAmountLimit) }
+              : {}),
             allowAchDebit: dto.allowAchDebit ?? false,
             allowAchCredit: dto.allowAchCredit ?? false,
           },

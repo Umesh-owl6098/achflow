@@ -66,6 +66,23 @@ describe('PaymentValidationService', () => {
     },
   );
 
+  it.each([BigInt(1), BigInt(10_000)])(
+    'accepts the valid %s-cent payment boundary',
+    async (amountCents) => {
+      const { service, repository } = createService({
+        ...payment,
+        amountCents,
+      });
+
+      await service.validate(payment.id, 'event-1');
+
+      expect(repository.reserveDailyUsageAndTransition).toHaveBeenCalledWith(
+        expect.objectContaining({ amountCents }),
+        'event-1',
+      );
+    },
+  );
+
   it.each([BigInt(0), BigInt(-1)])(
     'transitions a non-positive amount to VALIDATION_FAILED',
     async (amountCents) => {

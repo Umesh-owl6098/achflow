@@ -175,6 +175,25 @@ describe('AdminSimulatorService', () => {
     expect(tpsErrors).not.toHaveLength(0);
   });
 
+  it('accepts one-cent simulator amounts and rejects zero cents', async () => {
+    const accepted = await validate(
+      plainToInstance(CreateSimulatorRunDto, {
+        ...simulatorRunDto(),
+        minimumAmountCents: 1,
+        maximumAmountCents: 10_000,
+      }),
+    );
+    const rejected = await validate(
+      plainToInstance(CreateSimulatorRunDto, {
+        ...simulatorRunDto(),
+        minimumAmountCents: 0,
+      }),
+    );
+
+    expect(accepted).toHaveLength(0);
+    expect(rejected).not.toHaveLength(0);
+  });
+
   it('accepts scenario percentages totaling 100 including duplicate requests', async () => {
     process.env.NODE_ENV = 'test';
     const prisma = activeSimulatorPrisma();

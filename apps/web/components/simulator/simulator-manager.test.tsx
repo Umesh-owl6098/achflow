@@ -59,6 +59,8 @@ describe("SimulatorManager", () => {
 
     expect(await screen.findByText("Active merchant")).toBeInTheDocument();
     expect(screen.getByText("No simulator runs")).toBeInTheDocument();
+    expect(screen.getByLabelText("Minimum cents")).toHaveValue(1);
+    expect(screen.getByLabelText("Maximum cents")).toHaveValue(10_000);
     expect(
       screen.getByRole("button", { name: "Complete configuration to start" }),
     ).toBeDisabled();
@@ -126,6 +128,9 @@ describe("SimulatorManager", () => {
 
     expect(await screen.findByText("Low limit merchant")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/Low limit merchant LOW_LIMIT/));
+    fireEvent.change(screen.getByLabelText("Minimum cents"), {
+      target: { value: "100" },
+    });
 
     expect(screen.getByText(/Not eligible/)).toHaveTextContent(
       "$1.00 exceeds its $0.45 per-payment limit.",

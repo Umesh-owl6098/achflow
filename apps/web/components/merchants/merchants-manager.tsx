@@ -448,8 +448,12 @@ function CreateMerchantDialog({
           merchantCode: String(form.get("merchantCode") ?? ""),
           legalName: String(form.get("legalName") ?? ""),
           displayName: String(form.get("displayName") ?? ""),
-          perPaymentLimit: String(form.get("perPaymentLimit") ?? ""),
-          dailyAmountLimit: String(form.get("dailyAmountLimit") ?? ""),
+          ...(String(form.get("perPaymentLimit") ?? "").trim()
+            ? { perPaymentLimit: String(form.get("perPaymentLimit")) }
+            : {}),
+          ...(String(form.get("dailyAmountLimit") ?? "").trim()
+            ? { dailyAmountLimit: String(form.get("dailyAmountLimit")) }
+            : {}),
           status: String(form.get("status") ?? "ACTIVE"),
           allowAchDebit: form.get("allowAchDebit") === "on",
           allowAchCredit: form.get("allowAchCredit") === "on",
@@ -494,14 +498,16 @@ function CreateMerchantDialog({
               <Field
                 name="perPaymentLimit"
                 label="Per-payment limit (cents)"
-                placeholder="100000"
+                placeholder="10000"
                 inputMode="numeric"
+                required={false}
               />
               <Field
                 name="dailyAmountLimit"
                 label="Daily limit (cents)"
-                placeholder="1000000"
+                placeholder="100000"
                 inputMode="numeric"
+                required={false}
               />
             </div>
             <label className="grid gap-1 text-sm">
@@ -550,17 +556,19 @@ function Field({
   label,
   placeholder,
   inputMode,
+  required = true,
 }: {
   name: string;
   label: string;
   placeholder: string;
   inputMode?: "numeric";
+  required?: boolean;
 }) {
   return (
     <label className="grid gap-1 text-sm">
       <span>{label}</span>
       <input
-        required
+        required={required}
         name={name}
         placeholder={placeholder}
         inputMode={inputMode}

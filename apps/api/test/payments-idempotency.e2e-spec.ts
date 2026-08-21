@@ -727,6 +727,44 @@ describe('Payments idempotency (integration)', () => {
       .expect(403);
   });
 
+  it('uses database merchant-limit defaults while preserving explicit custom limits', async () => {
+    const defaulted = await request(app.getHttpServer())
+      .post('/api/v1/admin/merchants')
+      .set('Authorization', bearer(adminApiKey))
+      .send({
+        merchantCode: 'DEFAULT_LIMITS',
+        legalName: 'Default Limits LLC',
+        displayName: 'Default Limits',
+      })
+      .expect(201);
+    const defaultedMerchant = await prisma.merchant.findUniqueOrThrow({
+      where: {
+        id: (defaulted.body as { merchant: { id: string } }).merchant.id,
+      },
+    });
+    expect(defaultedMerchant.perPaymentLimit).toBe(10_000n);
+    expect(defaultedMerchant.dailyAmountLimit).toBe(100_000n);
+
+    const customized = await request(app.getHttpServer())
+      .post('/api/v1/admin/merchants')
+      .set('Authorization', bearer(adminApiKey))
+      .send({
+        merchantCode: 'CUSTOM_LIMITS',
+        legalName: 'Custom Limits LLC',
+        displayName: 'Custom Limits',
+        perPaymentLimit: '250',
+        dailyAmountLimit: '250000',
+      })
+      .expect(201);
+    const customMerchant = await prisma.merchant.findUniqueOrThrow({
+      where: {
+        id: (customized.body as { merchant: { id: string } }).merchant.id,
+      },
+    });
+    expect(customMerchant.perPaymentLimit).toBe(250n);
+    expect(customMerchant.dailyAmountLimit).toBe(250_000n);
+  });
+
   it('lists authenticated merchant payments with server-side filters and pagination', async () => {
     const created = await request(app.getHttpServer())
       .post('/api/v1/payments')

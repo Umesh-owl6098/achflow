@@ -90,4 +90,18 @@ describe("MerchantsManager", () => {
       expect(screen.getByText("No merchants found")).toBeInTheDocument(),
     );
   });
+
+  it("allows the create form to omit limits and use API defaults", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response()));
+    renderMerchants();
+    await screen.findByText("Northstar Paper");
+
+    fireEvent.click(screen.getByRole("button", { name: "Create merchant" }));
+
+    expect(
+      screen.getByLabelText("Per-payment limit (cents)"),
+    ).not.toBeRequired();
+    expect(screen.getByLabelText("Daily limit (cents)")).not.toBeRequired();
+    expect(screen.getByLabelText("Merchant name")).toBeRequired();
+  });
 });
