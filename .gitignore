@@ -44,3 +44,5 @@ evals/results/
 # Prisma
 *.db
 *.db-journal
+
+.references/
