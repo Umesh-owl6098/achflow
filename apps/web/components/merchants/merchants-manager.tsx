@@ -42,6 +42,14 @@ type MerchantDetail = Merchant & {
     postedBalanceCents: string;
     reservedBalanceCents: string;
     availableBalanceCents: string;
+    accounts: Array<{
+      id: string;
+      currency: string;
+      status: string;
+      postedBalanceCents: string;
+      reservedBalanceCents: string;
+      availableBalanceCents: string;
+    }>;
   };
   totalProcessedVolumeCents: string;
   paymentStatusBreakdown: Record<string, number>;
@@ -460,6 +468,23 @@ function CreateMerchantDialog({
         }),
       });
       setApiKey(result.apiKey);
+      if (form.get("provisionDemoFunding") === "on") {
+        try {
+          await adminApi(
+            `/api/admin/simulator/merchants/${encodeURIComponent(result.merchant.id)}/demo-funding`,
+            {
+              method: "POST",
+              body: JSON.stringify({ amountCents: "100000", currency: "USD" }),
+            },
+          );
+        } catch (reason) {
+          setError(
+            reason instanceof Error
+              ? `Merchant was created, but demo funding could not be provisioned: ${reason.message}`
+              : "Merchant was created, but demo funding could not be provisioned.",
+          );
+        }
+      }
       onCreated();
     } catch (reason) {
       setError(
@@ -476,7 +501,14 @@ function CreateMerchantDialog({
           <DialogTitle>Create merchant</DialogTitle>
         </DialogHeader>
         {apiKey ? (
-          <SecretReveal apiKey={apiKey} onDismiss={close} />
+          <div className="space-y-3">
+            <SecretReveal apiKey={apiKey} onDismiss={close} />
+            {error ? (
+              <p role="alert" className="text-sm text-red-600">
+                {error}
+              </p>
+            ) : null}
+          </div>
         ) : (
           <form className="space-y-3" onSubmit={submit}>
             <Field
@@ -532,10 +564,20 @@ function CreateMerchantDialog({
                 ACH credit
               </label>
             </fieldset>
-            <p className="text-xs text-slate-500">
-              Funding accounts are configured separately after merchant
-              creation.
-            </p>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                name="provisionDemoFunding"
+                type="checkbox"
+                defaultChecked
+              />
+              <span>
+                Provision $1,000 demo USD funding
+                <span className="mt-0.5 block text-xs text-slate-500">
+                  Creates an explicit, idempotent demo funding entry. It does
+                  not bypass payment funding checks.
+                </span>
+              </span>
+            </label>
             {error ? (
               <p role="alert" className="text-sm text-red-600">
                 {error}
@@ -589,6 +631,7 @@ function MerchantDrawer({
 }) {
   const [newKey, setNewKey] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [isProvisioningFunding, setIsProvisioningFunding] = useState(false);
   const detailsQuery = useQuery({
     queryKey: ["admin-merchant", merchantId],
     enabled: Boolean(merchantId),
@@ -635,7 +678,33 @@ function MerchantDrawer({
       );
     }
   };
+  const provisionDemoFunding = async () => {
+    if (!merchantId) return;
+    setActionError(null);
+    setIsProvisioningFunding(true);
+    try {
+      await adminApi(
+        `/api/admin/simulator/merchants/${encodeURIComponent(merchantId)}/demo-funding`,
+        {
+          method: "POST",
+          body: JSON.stringify({ amountCents: "100000", currency: "USD" }),
+        },
+      );
+      onChanged();
+    } catch (reason) {
+      setActionError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to provision demo funding.",
+      );
+    } finally {
+      setIsProvisioningFunding(false);
+    }
+  };
   const detail = detailsQuery.data;
+  const usdFunding = detail?.funding.accounts.find(
+    (account) => account.currency === "USD" && account.status === "ACTIVE",
+  );
   return (
     <Dialog
       open={Boolean(merchantId)}
@@ -688,6 +757,38 @@ function MerchantDrawer({
                 label="Funding accounts"
                 value={String(detail.funding.accountCount)}
               />
+            </section>
+            <section className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium">USD demo funding</p>
+                  {usdFunding ? (
+                    <p className="mt-1 text-slate-500">
+                      Active USD funding account · posted{" "}
+                      {formatMoney(usdFunding.postedBalanceCents)} · reserved{" "}
+                      {formatMoney(usdFunding.reservedBalanceCents)} · available{" "}
+                      {formatMoney(usdFunding.availableBalanceCents)}
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-slate-500">
+                      No active USD funding account. ACH credit and mixed
+                      simulator runs require one.
+                    </p>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isProvisioningFunding}
+                  onClick={() => void provisionDemoFunding()}
+                >
+                  {isProvisioningFunding
+                    ? "Provisioning…"
+                    : usdFunding
+                      ? "Ensure demo funding"
+                      : "Provision demo funding"}
+                </Button>
+              </div>
             </section>
             <section className="space-y-1">
               <p className="font-medium">API key metadata</p>

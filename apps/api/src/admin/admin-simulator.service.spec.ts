@@ -1,4 +1,6 @@
 import {
+  FundingAccountStatus,
+  LedgerEntryType,
   MerchantStatus,
   PaymentDirection,
   SimulatorRunStatus,
@@ -141,6 +143,66 @@ describe('AdminSimulatorService', () => {
           activeFundingCurrencies: ['USD'],
         },
       ],
+    });
+  });
+
+  it('provisions explicit demo funding once with a deterministic ledger key', async () => {
+    process.env.NODE_ENV = 'test';
+    const fundingAccount = {
+      id: 'funding-usd',
+      status: FundingAccountStatus.ACTIVE,
+    };
+    const transaction = {
+      merchant: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'merchant-1' }),
+      },
+      fundingAccount: { upsert: jest.fn().mockResolvedValue(fundingAccount) },
+      ledgerEntry: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({ amount: 100_000n }),
+        create: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const prisma = {
+      $transaction: jest.fn((callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    };
+    const service = new AdminSimulatorService(prisma as never, {} as never);
+
+    await expect(
+      service.provisionDemoFunding('merchant-1', {
+        amountCents: '100000',
+        currency: 'USD',
+      }),
+    ).resolves.toEqual({
+      fundingAccountId: 'funding-usd',
+      currency: 'USD',
+      amountCents: '100000',
+      provisioned: true,
+    });
+    await expect(
+      service.provisionDemoFunding('merchant-1', {
+        amountCents: '100000',
+        currency: 'USD',
+      }),
+    ).resolves.toEqual({
+      fundingAccountId: 'funding-usd',
+      currency: 'USD',
+      amountCents: '100000',
+      provisioned: false,
+    });
+
+    expect(transaction.ledgerEntry.create).toHaveBeenCalledTimes(1);
+    expect(transaction.ledgerEntry.create).toHaveBeenCalledWith({
+      data: {
+        entryKey: 'demo-funding:merchant-1:USD',
+        amount: 100_000n,
+        fundingAccountId: 'funding-usd',
+        entryType: LedgerEntryType.INITIAL_CREDIT,
+      },
     });
   });
 

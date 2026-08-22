@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./dashboard";
@@ -48,7 +54,10 @@ function renderDashboard() {
   );
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("Dashboard", () => {
   it("renders live dashboard summary data", async () => {
@@ -92,5 +101,42 @@ describe("Dashboard", () => {
     expect(
       await screen.findByText("Dashboard unavailable"),
     ).toBeInTheDocument();
+  });
+
+  it("loads all merchants first and updates dashboard data for a selected merchant", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.startsWith("/api/admin/merchants")
+        ? {
+            data: [
+              {
+                id: "merchant-b",
+                merchantCode: "B",
+                displayName: "Merchant B",
+              },
+            ],
+          }
+        : response;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderDashboard();
+    await screen.findByText("Demo Merchant");
+    await screen.findByRole("option", { name: "Merchant B (B)" });
+    fireEvent.change(screen.getByLabelText("Merchant scope"), {
+      target: { value: "merchant-b" },
+    });
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/dashboard?merchantId=merchant-b",
+        expect.anything(),
+      ),
+    );
   });
 });

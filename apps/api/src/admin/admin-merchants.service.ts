@@ -148,17 +148,7 @@ export class AdminMerchantsService {
       .reduce((sum, reservation) => sum + reservation.amount, 0n);
     const posted = m.fundingAccounts
       .flatMap((account) => account.entries)
-      .reduce(
-        (sum, entry) =>
-          sum +
-          (entry.entryType === LedgerEntryType.DEBIT_POSTED
-            ? -entry.amount
-            : entry.entryType === LedgerEntryType.INITIAL_CREDIT ||
-                entry.entryType === LedgerEntryType.CREDIT_POSTED
-              ? entry.amount
-              : 0n),
-        0n,
-      );
+      .reduce((sum, entry) => sum + ledgerBalanceImpact(entry), 0n);
     return {
       id: m.id,
       merchantCode: m.merchantCode,
@@ -185,17 +175,7 @@ export class AdminMerchantsService {
       .reduce((sum, reservation) => sum + reservation.amount, 0n);
     const posted = m.fundingAccounts
       .flatMap((account) => account.entries)
-      .reduce(
-        (sum, entry) =>
-          sum +
-          (entry.entryType === LedgerEntryType.DEBIT_POSTED
-            ? -entry.amount
-            : entry.entryType === LedgerEntryType.INITIAL_CREDIT ||
-                entry.entryType === LedgerEntryType.CREDIT_POSTED
-              ? entry.amount
-              : 0n),
-        0n,
-      );
+      .reduce((sum, entry) => sum + ledgerBalanceImpact(entry), 0n);
     return {
       id: m.id,
       merchantCode: m.merchantCode,
@@ -216,6 +196,25 @@ export class AdminMerchantsService {
         postedBalanceCents: posted.toString(),
         reservedBalanceCents: reserved.toString(),
         availableBalanceCents: (posted - reserved).toString(),
+        accounts: m.fundingAccounts.map((account) => {
+          const accountReserved = account.reservations
+            .filter(
+              (reservation) => reservation.status === ReservationStatus.ACTIVE,
+            )
+            .reduce((sum, reservation) => sum + reservation.amount, 0n);
+          const accountPosted = account.entries.reduce(
+            (sum, entry) => sum + ledgerBalanceImpact(entry),
+            0n,
+          );
+          return {
+            id: account.id,
+            currency: account.currency,
+            status: account.status,
+            postedBalanceCents: accountPosted.toString(),
+            reservedBalanceCents: accountReserved.toString(),
+            availableBalanceCents: (accountPosted - accountReserved).toString(),
+          };
+        }),
       },
       totalProcessedVolumeCents: volume.toString(),
       paymentStatusBreakdown: countStatuses(m.payments),
@@ -228,6 +227,23 @@ export class AdminMerchantsService {
       webhookEndpoints: m.webhookEndpoints,
     };
   }
+}
+
+function ledgerBalanceImpact(entry: {
+  entryType: LedgerEntryType;
+  amount: bigint;
+}) {
+  if (entry.entryType === LedgerEntryType.DEBIT_POSTED) return -entry.amount;
+  if (
+    entry.entryType === LedgerEntryType.INITIAL_CREDIT ||
+    entry.entryType === LedgerEntryType.CREDIT_POSTED ||
+    entry.entryType === LedgerEntryType.RETURN ||
+    entry.entryType === LedgerEntryType.REVERSAL ||
+    entry.entryType === LedgerEntryType.ADJUSTMENT
+  ) {
+    return entry.amount;
+  }
+  return 0n;
 }
 function countStatuses(payments: Array<{ status: PaymentStatus }>) {
   return payments.reduce<Record<string, number>>((counts, p) => {

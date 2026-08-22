@@ -23,6 +23,23 @@ const merchant = {
   availableBalanceCents: "175000",
 };
 
+const detail = {
+  ...merchant,
+  legalName: "Northstar Paper LLC",
+  updatedAt: "2026-07-30T00:00:00.000Z",
+  apiKey: null,
+  funding: {
+    accountCount: 0,
+    postedBalanceCents: "0",
+    reservedBalanceCents: "0",
+    availableBalanceCents: "0",
+    accounts: [],
+  },
+  paymentStatusBreakdown: {},
+  recentPayments: [],
+  webhookEndpoints: [],
+};
+
 function renderMerchants() {
   return render(
     <QueryClientProvider
@@ -103,5 +120,90 @@ describe("MerchantsManager", () => {
     ).not.toBeRequired();
     expect(screen.getByLabelText("Daily limit (cents)")).not.toBeRequired();
     expect(screen.getByLabelText("Merchant name")).toBeRequired();
+  });
+
+  it("provisions explicit demo funding after creating a merchant when selected", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/admin/merchants" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              merchant: { ...merchant, id: "merchant-created" },
+              apiKey: "created-key",
+            }),
+            { status: 201, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      if (url === "/api/admin/merchants") return Promise.resolve(response());
+      return Promise.resolve(
+        new Response(JSON.stringify({ provisioned: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderMerchants();
+    await screen.findByText("Northstar Paper");
+    fireEvent.click(screen.getByRole("button", { name: "Create merchant" }));
+    fireEvent.change(screen.getByLabelText("Merchant name"), {
+      target: { value: "Created Merchant" },
+    });
+    fireEvent.change(screen.getByLabelText("Legal name"), {
+      target: { value: "Created Merchant LLC" },
+    });
+    fireEvent.change(screen.getByLabelText("Merchant code"), {
+      target: { value: "CREATED" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create and reveal API key" }),
+    );
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/admin/simulator/merchants/merchant-created/demo-funding",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
+  it("shows missing USD funding and provisions it for an existing merchant", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/admin/merchants") return Promise.resolve(response());
+      if (url === "/api/admin/merchants/merchant-001") {
+        return Promise.resolve(
+          new Response(JSON.stringify(detail), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ provisioned: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderMerchants();
+    await screen.findByText("Northstar Paper");
+    fireEvent.click(screen.getByText("Northstar Paper"));
+    expect(
+      await screen.findByText(/No active USD funding account/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provision demo funding" }),
+    );
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/admin/simulator/merchants/merchant-001/demo-funding",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
   });
 });

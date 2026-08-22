@@ -95,6 +95,8 @@ export function Dashboard() {
   const query = useQuery({
     queryKey: ["dashboard", merchantId],
     queryFn: () => loadDashboard(merchantId),
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   });
   const merchantsQuery = useQuery({
     queryKey: ["admin-merchants"],
