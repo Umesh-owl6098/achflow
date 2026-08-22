@@ -90,6 +90,8 @@ describe("NachaFilesTable", () => {
     expect(await screen.findByText("ach-260730-demo.ach")).toBeInTheDocument();
     expect(screen.getAllByText("$70.00")).toHaveLength(2);
     expect(screen.getByText("Payments exported")).toBeInTheDocument();
+    expect(screen.getByText("Files generated today (UTC)")).toBeInTheDocument();
+    expect(screen.getByText("Created (UTC)")).toBeInTheDocument();
   });
 
   it("filters files and debounces search", async () => {

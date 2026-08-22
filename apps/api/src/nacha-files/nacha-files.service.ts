@@ -123,7 +123,15 @@ export class NachaFilesService {
         }),
         this.prisma.achFile.count({
           where: {
-            AND: [where, { createdAt: { gte: startOfUtcDay(new Date()) } }],
+            AND: [
+              where,
+              {
+                createdAt: {
+                  gte: startOfUtcDay(new Date()),
+                  lt: addUtcDays(startOfUtcDay(new Date()), 1),
+                },
+              },
+            ],
           },
         }),
         this.prisma.achFile.count({

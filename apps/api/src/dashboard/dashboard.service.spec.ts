@@ -18,6 +18,46 @@ function payment(id: string, merchant: typeof merchantA, amountCents: bigint) {
 }
 
 describe('DashboardService', () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('uses the same UTC reporting day for today metrics and the chart range', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-22T00:01:00.000Z'));
+    const paymentQueries: Array<{ where: unknown }> = [];
+    const prisma = {
+      payment: {
+        findMany: jest.fn((query: { where: unknown }) => {
+          paymentQueries.push(query);
+          return Promise.resolve([]);
+        }),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new DashboardService(prisma as never);
+
+    await service.getAdminDashboard();
+
+    expect(paymentQueries[0]).toEqual(
+      expect.objectContaining({
+        where: {
+          createdAt: {
+            gte: new Date('2026-08-22T00:00:00.000Z'),
+            lt: new Date('2026-08-23T00:00:00.000Z'),
+          },
+        },
+      }),
+    );
+    expect(paymentQueries[1]).toEqual(
+      expect.objectContaining({
+        where: {
+          createdAt: {
+            gte: new Date('2026-08-16T00:00:00.000Z'),
+            lt: new Date('2026-08-23T00:00:00.000Z'),
+          },
+        },
+      }),
+    );
+  });
+
   it('aggregates payments from multiple merchants for the admin all-merchants scope', async () => {
     const payments = [
       payment('payment-a', merchantA, 100n),

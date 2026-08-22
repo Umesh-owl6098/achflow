@@ -129,7 +129,7 @@ export function NachaFilesTable() {
       />
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Summary
-          label="Files generated today"
+          label="Files generated today (UTC)"
           value={String(data.summary.filesGeneratedToday)}
         />
         <Summary
@@ -193,7 +193,7 @@ export function NachaFilesTable() {
           </select>
         </label>
         <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
-          Date range
+          Date range (UTC)
           <select
             aria-label="NACHA date range filter"
             value={filters.dateRange}
@@ -241,7 +241,7 @@ export function NachaFilesTable() {
                 <tr>
                   <th className="px-4 py-3 font-medium">File ID</th>
                   <th className="px-4 py-3 font-medium">File name</th>
-                  <th className="px-4 py-3 font-medium">Created</th>
+                  <th className="px-4 py-3 font-medium">Created (UTC)</th>
                   <th className="px-4 py-3 text-right font-medium">
                     Total payments
                   </th>
@@ -558,8 +558,13 @@ function DateInput({
 }
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short",
   }).format(new Date(value));
 }
 async function downloadFile(file: NachaFile) {

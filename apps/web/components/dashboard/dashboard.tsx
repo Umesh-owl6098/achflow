@@ -67,19 +67,19 @@ async function loadMerchants(): Promise<MerchantOption[]> {
 
 const summaryCards = [
   [
-    "Payments today",
+    "Payments today (UTC)",
     (data: DashboardData) => String(data.summary.paymentsToday),
   ],
   [
-    "Total amount today",
+    "Total amount today (UTC)",
     (data: DashboardData) => formatUsd(data.summary.totalAmountCents),
   ],
   [
-    "ACH debits today",
+    "ACH debits today (UTC)",
     (data: DashboardData) => formatUsd(data.summary.debitAmountCents),
   ],
   [
-    "ACH credits today",
+    "ACH credits today (UTC)",
     (data: DashboardData) => formatUsd(data.summary.creditAmountCents),
   ],
   [
@@ -161,6 +161,8 @@ export function Dashboard() {
             {new Intl.DateTimeFormat("en-US", {
               hour: "numeric",
               minute: "2-digit",
+              timeZone: "UTC",
+              timeZoneName: "short",
             }).format(new Date(data.generatedAt))}
           </span>
           <Button
@@ -316,6 +318,8 @@ export function Dashboard() {
                       day: "numeric",
                       hour: "numeric",
                       minute: "2-digit",
+                      timeZone: "UTC",
+                      timeZoneName: "short",
                     }).format(new Date(payment.createdAt))}
                   </td>
                 </tr>
