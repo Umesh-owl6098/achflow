@@ -106,6 +106,59 @@ describe('DashboardService', () => {
     });
   });
 
+  it('counts validation-failed attempts without treating their requested amount as financial volume', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-22T12:00:00.000Z'));
+    const payments = [
+      {
+        ...payment('failed-outlier', merchantA, 1_000_000_000_000n),
+        direction: PaymentDirection.CREDIT,
+        status: PaymentStatus.VALIDATION_FAILED,
+        createdAt: new Date('2026-08-22T00:01:00.000Z'),
+      },
+      {
+        ...payment('debit-100', merchantA, 100n),
+        direction: PaymentDirection.DEBIT,
+        createdAt: new Date('2026-08-22T00:02:00.000Z'),
+      },
+      {
+        ...payment('credit-120', merchantB, 120n),
+        direction: PaymentDirection.CREDIT,
+        createdAt: new Date('2026-08-22T00:03:00.000Z'),
+      },
+    ];
+    const prisma = {
+      payment: {
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce(payments)
+          .mockResolvedValueOnce(payments)
+          .mockResolvedValueOnce(payments),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new DashboardService(prisma as never);
+
+    const dashboard = await service.getAdminDashboard();
+
+    expect(dashboard.summary).toEqual(
+      expect.objectContaining({
+        paymentsToday: 3,
+        totalAmountCents: '220',
+        debitAmountCents: '100',
+        creditAmountCents: '120',
+      }),
+    );
+    expect(dashboard.dailyVolume.at(-1)).toEqual({
+      date: '2026-08-22',
+      debitCount: 1,
+      creditCount: 2,
+      totalCount: 3,
+      debitAmountCents: '100',
+      creditAmountCents: '120',
+      totalAmountCents: '220',
+    });
+  });
+
   it('aggregates payments from multiple merchants for the admin all-merchants scope', async () => {
     const payments = [
       payment('payment-a', merchantA, 100n),

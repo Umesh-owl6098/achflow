@@ -78,16 +78,17 @@ export class DashboardService {
 }
 
 function buildSummary(payments: DashboardPayment[]) {
-  const debitPayments = payments.filter(
+  const financialPayments = payments.filter(isFinancialAmount);
+  const debitPayments = financialPayments.filter(
     (payment) => payment.direction === PaymentDirection.DEBIT,
   );
-  const creditPayments = payments.filter(
+  const creditPayments = financialPayments.filter(
     (payment) => payment.direction === PaymentDirection.CREDIT,
   );
 
   return {
     paymentsToday: payments.length,
-    totalAmountCents: sumAmounts(payments).toString(),
+    totalAmountCents: sumAmounts(financialPayments).toString(),
     debitAmountCents: sumAmounts(debitPayments).toString(),
     creditAmountCents: sumAmounts(creditPayments).toString(),
     submittedPayments: payments.filter(
@@ -126,11 +127,11 @@ function buildDailyVolume(payments: DashboardPayment[], start: Date) {
     const record = records.get(key);
     if (!record) continue;
     if (payment.direction === PaymentDirection.DEBIT) {
-      record.debit += payment.amountCents;
       record.debitCount += 1;
+      if (isFinancialAmount(payment)) record.debit += payment.amountCents;
     } else {
-      record.credit += payment.amountCents;
       record.creditCount += 1;
+      if (isFinancialAmount(payment)) record.credit += payment.amountCents;
     }
   }
 
@@ -143,6 +144,10 @@ function buildDailyVolume(payments: DashboardPayment[], start: Date) {
     creditAmountCents: amount.credit.toString(),
     totalAmountCents: (amount.debit + amount.credit).toString(),
   }));
+}
+
+function isFinancialAmount(payment: DashboardPayment): boolean {
+  return payment.status !== PaymentStatus.VALIDATION_FAILED;
 }
 
 function buildStatusDistribution(

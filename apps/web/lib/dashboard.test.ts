@@ -71,6 +71,7 @@ describe("dashboard utilities", () => {
     expect(formatChartCents(100)).toBe("$1.00");
     expect(formatChartCents(120)).toBe("$1.20");
     expect(formatChartCents(220)).toBe("$2.20");
+    expect(formatChartCents(100370)).toBe("$1,003.70");
     expect(formatCompactChartCents(100370)).toBe("$1K");
     expect(formatUtcChartDay("2026-08-22", "2026-08-22")).toBe("Today");
   });

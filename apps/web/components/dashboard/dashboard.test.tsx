@@ -81,6 +81,11 @@ describe("Dashboard", () => {
     expect(
       screen.getByText("Today: 0 total · 0 debit · 0 credit"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Amounts exclude validation-failed attempts because they have no financial effect.",
+      ),
+    ).toBeInTheDocument();
   });
   it("renders an empty state for an empty payment database", async () => {
     vi.stubGlobal(

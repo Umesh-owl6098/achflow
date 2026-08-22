@@ -429,6 +429,55 @@ describe('AdminSimulatorService', () => {
     ).toBe(251);
   });
 
+  it('rejects an unbounded validation-failure amount before creating a run', async () => {
+    process.env.NODE_ENV = 'test';
+    const prisma = activeSimulatorPrisma();
+    prisma.merchant.findMany.mockResolvedValue([
+      {
+        id: 'merchant-1',
+        merchantCode: 'UNBOUNDED',
+        displayName: 'Unbounded merchant',
+        allowAchDebit: true,
+        allowAchCredit: true,
+        perPaymentLimit: 999_999_999_999n,
+      },
+    ]);
+    const payments = { create: jest.fn() };
+    const service = new AdminSimulatorService(
+      prisma as never,
+      payments as never,
+    );
+
+    await expect(
+      service.createRun(
+        simulatorRunDto({
+          successfulPercent: 0,
+          validationFailurePercent: 100,
+        }),
+      ),
+    ).rejects.toThrow(
+      'No bounded validation-failure amount exists for merchant UNBOUNDED.',
+    );
+    expect(prisma.simulatorRun.create).not.toHaveBeenCalled();
+    expect(payments.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps the amount generator bounded if called after validation', () => {
+    const service = new AdminSimulatorService({} as never, {} as never);
+    const amountFor = simulatorAmountFor(service);
+
+    expect(() =>
+      amountFor(
+        simulatorRunDto(),
+        { perPaymentLimit: 999_999_999_999n },
+        0,
+        true,
+      ),
+    ).toThrow(
+      'Simulator validation-failure amount exceeds the supported maximum.',
+    );
+  });
+
   it('rejects an impossible successful amount range before creating a run', async () => {
     process.env.NODE_ENV = 'test';
     const prisma = activeSimulatorPrisma();

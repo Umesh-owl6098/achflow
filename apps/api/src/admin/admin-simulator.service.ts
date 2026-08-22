@@ -31,6 +31,8 @@ type SimulatorMerchant = {
   perPaymentLimit: bigint;
 };
 
+const MAX_SIMULATOR_AMOUNT_CENTS = 1_000_000n;
+
 @Injectable()
 export class AdminSimulatorService {
   constructor(
@@ -140,7 +142,7 @@ export class AdminSimulatorService {
         'Every selected merchant must exist and be active.',
       );
     }
-    this.validateSuccessfulAmountRanges(dto, merchants);
+    this.validateAmountRanges(dto, merchants);
     const run = await this.prisma.simulatorRun.create({
       data: {
         configuration: dto as unknown as Prisma.InputJsonValue,
@@ -228,7 +230,7 @@ export class AdminSimulatorService {
         perPaymentLimit: true,
       },
     });
-    this.validateSuccessfulAmountRanges(config, merchants);
+    this.validateAmountRanges(config, merchants);
     const run = await this.transition(id, SimulatorRunStatus.RUNNING, [
       SimulatorRunStatus.PAUSED,
     ]);
@@ -379,9 +381,9 @@ export class AdminSimulatorService {
       return dto.minimumAmountCents + (index % span);
     }
     const invalid = merchant.perPaymentLimit + BigInt(1);
-    if (invalid > BigInt(Number.MAX_SAFE_INTEGER)) {
+    if (invalid > MAX_SIMULATOR_AMOUNT_CENTS) {
       throw new BadRequestException(
-        'Merchant limit is too large for simulator input.',
+        'Simulator validation-failure amount exceeds the supported maximum.',
       );
     }
     return Number(invalid);
@@ -425,17 +427,26 @@ export class AdminSimulatorService {
     }
   }
 
-  private validateSuccessfulAmountRanges(
+  private validateAmountRanges(
     dto: CreateSimulatorRunDto,
     merchants: SimulatorMerchant[],
   ) {
-    if (dto.scenario.validationFailurePercent === 100) return;
-
     const minimumAmountCents = BigInt(dto.minimumAmountCents);
     for (const merchant of merchants) {
-      if (minimumAmountCents > merchant.perPaymentLimit) {
+      if (
+        dto.scenario.validationFailurePercent < 100 &&
+        minimumAmountCents > merchant.perPaymentLimit
+      ) {
         throw new BadRequestException(
           `No valid successful payment amount exists for merchant ${merchant.merchantCode}.`,
+        );
+      }
+      if (
+        dto.scenario.validationFailurePercent > 0 &&
+        merchant.perPaymentLimit >= MAX_SIMULATOR_AMOUNT_CENTS
+      ) {
+        throw new BadRequestException(
+          `No bounded validation-failure amount exists for merchant ${merchant.merchantCode}.`,
         );
       }
     }

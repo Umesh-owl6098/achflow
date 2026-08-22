@@ -240,6 +240,10 @@ export function Dashboard() {
               }
             />
           </div>
+          <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+            Amounts exclude validation-failed attempts because they have no
+            financial effect.
+          </p>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
           <h3 className="text-sm font-semibold">Status distribution</h3>
