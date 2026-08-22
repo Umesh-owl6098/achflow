@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   dashboardChartSeries,
+  formatCompactChartCents,
   formatChartCents,
+  formatUtcChartDay,
   formatUsd,
   parseDashboardData,
   statusTone,
@@ -24,19 +26,53 @@ const dashboard = {
 };
 
 describe("dashboard utilities", () => {
-  it("maps current-day debit and credit cents to the chart without double conversion", () => {
+  it("keeps today's transaction count and exact amount data separate from a historical outlier", () => {
     expect(
       dashboardChartSeries([
         {
+          date: "2026-08-16",
+          debitCount: 0,
+          creditCount: 1,
+          totalCount: 1,
+          debitAmountCents: "0",
+          creditAmountCents: "100370",
+          totalAmountCents: "100370",
+        },
+        {
           date: "2026-08-22",
-          debitAmountCents: "25",
-          creditAmountCents: "30",
-          totalAmountCents: "55",
+          debitCount: 20,
+          creditCount: 20,
+          totalCount: 40,
+          debitAmountCents: "100",
+          creditAmountCents: "120",
+          totalAmountCents: "220",
         },
       ]),
-    ).toEqual([{ date: "2026-08-22", debitCents: 25, creditCents: 30 }]);
-    expect(formatChartCents(25)).toBe("$0.25");
-    expect(formatChartCents(30)).toBe("$0.30");
+    ).toEqual([
+      {
+        date: "2026-08-16",
+        debitCount: 0,
+        creditCount: 1,
+        totalCount: 1,
+        debitCents: 0,
+        creditCents: 100370,
+        totalCents: 100370,
+      },
+      {
+        date: "2026-08-22",
+        debitCount: 20,
+        creditCount: 20,
+        totalCount: 40,
+        debitCents: 100,
+        creditCents: 120,
+        totalCents: 220,
+      },
+    ]);
+    expect(formatChartCents(100)).toBe("$1.00");
+    expect(formatChartCents(120)).toBe("$1.20");
+    expect(formatChartCents(220)).toBe("$2.20");
+    expect(formatCompactChartCents(100370)).toBe("$1K");
+    expect(formatUtcChartDay("2026-08-22", "2026-08-22")).toBe("Today");
   });
   it("formats cents as USD", () => expect(formatUsd("2500")).toBe("$25.00"));
   it("maps ACH statuses to dashboard badge tones", () => {

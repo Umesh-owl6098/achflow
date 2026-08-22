@@ -23,10 +23,25 @@ import {
   DashboardData,
   dashboardChartSeries,
   formatChartCents,
+  formatCompactChartCents,
+  formatUtcChartDay,
   formatUsd,
   parseDashboardData,
   statusTone,
 } from "@/lib/dashboard";
+
+type ChartMetric = "debitCount" | "creditCount" | "debitCents" | "creditCents";
+
+type ActivityChartProps = {
+  ariaLabel: string;
+  chartData: ReturnType<typeof dashboardChartSeries>;
+  currentUtcDate: string;
+  title: string;
+  debitKey: ChartMetric;
+  creditKey: ChartMetric;
+  tooltipFormatter: (value: number) => string;
+  tooltipLabel: (date: string, debit: number, credit: number) => string;
+};
 
 async function loadDashboard(merchantId: string): Promise<DashboardData> {
   const query = merchantId
@@ -124,6 +139,7 @@ export function Dashboard() {
     );
 
   const chartData = dashboardChartSeries(data.dailyVolume);
+  const currentUtcDate = data.generatedAt.slice(0, 10);
 
   return (
     <div className="space-y-6">
@@ -191,55 +207,38 @@ export function Dashboard() {
       </section>
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_18rem]">
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
-          <h3 className="text-sm font-semibold">Payment volume</h3>
+          <h3 className="text-sm font-semibold">Payment activity</h3>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Last seven UTC business days
+            Last seven UTC days. Transaction count is shown first so recent
+            activity remains visible when historical payment amounts vary.
           </p>
-          <div
-            className="mt-5 h-64"
-            role="img"
-            aria-label="Daily ACH debit and credit payment volume"
-          >
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={chartData}
-                margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
-              >
-                <XAxis
-                  dataKey="date"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 12 }}
-                  tickFormatter={(value: string) =>
-                    new Intl.DateTimeFormat("en-US", {
-                      weekday: "short",
-                      timeZone: "UTC",
-                    }).format(new Date(`${value}T00:00:00Z`))
-                  }
-                />
-                <YAxis
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 12 }}
-                  tickFormatter={formatChartCents}
-                />
-                <Tooltip formatter={formatChartCents} />
-                <Bar
-                  dataKey="debitCents"
-                  name="Debit"
-                  fill="#64748b"
-                  minPointSize={3}
-                  radius={[3, 3, 0, 0]}
-                />
-                <Bar
-                  dataKey="creditCents"
-                  name="Credit"
-                  fill="#0f766e"
-                  minPointSize={3}
-                  radius={[3, 3, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="mt-5 grid gap-6 lg:grid-cols-2">
+            <ActivityChart
+              ariaLabel="Daily ACH debit and credit transaction counts"
+              chartData={chartData}
+              currentUtcDate={currentUtcDate}
+              title="Transactions"
+              debitKey="debitCount"
+              creditKey="creditCount"
+              tooltipFormatter={(value) => String(value)}
+              tooltipLabel={(date, debit, credit) =>
+                `${formatUtcChartDay(date, currentUtcDate)} · Total ${debit + credit} transactions`
+              }
+            />
+            <ActivityChart
+              ariaLabel="Daily ACH debit and credit payment amounts"
+              chartData={chartData}
+              currentUtcDate={currentUtcDate}
+              title="Amounts"
+              debitKey="debitCents"
+              creditKey="creditCents"
+              tooltipFormatter={formatChartCents}
+              tooltipLabel={(date, debit, credit) =>
+                `${formatUtcChartDay(date, currentUtcDate)} · Total ${formatChartCents(
+                  debit + credit,
+                )}`
+              }
+            />
           </div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
@@ -329,6 +328,93 @@ export function Dashboard() {
       </section>
     </div>
   );
+}
+
+function ActivityChart({
+  ariaLabel,
+  chartData,
+  currentUtcDate,
+  title,
+  debitKey,
+  creditKey,
+  tooltipFormatter,
+  tooltipLabel,
+}: ActivityChartProps) {
+  const isCurrency = debitKey === "debitCents";
+  const today = chartData.find((point) => point.date === currentUtcDate);
+
+  return (
+    <section>
+      <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+        {title}
+      </h4>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        {isCurrency
+          ? `Today: ${formatChartCents(today?.totalCents ?? 0)}`
+          : `Today: ${today?.totalCount ?? 0} total · ${today?.debitCount ?? 0} debit · ${today?.creditCount ?? 0} credit`}
+      </p>
+      <div className="mt-3 h-56" role="img" aria-label={ariaLabel}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={chartData}
+            margin={{ top: 8, right: 18, bottom: 0, left: 12 }}
+          >
+            <XAxis
+              dataKey="date"
+              axisLine={false}
+              tickLine={false}
+              tick={{ fontSize: 12 }}
+              tickFormatter={(value: string) =>
+                formatUtcChartDay(value, currentUtcDate)
+              }
+            />
+            <YAxis
+              axisLine={false}
+              tickLine={false}
+              tick={{ fontSize: 12 }}
+              width={isCurrency ? 58 : 34}
+              tickFormatter={
+                isCurrency
+                  ? formatCompactChartCents
+                  : (value: number) => String(value)
+              }
+            />
+            <Tooltip
+              formatter={(value) => tooltipFormatter(Number(value))}
+              labelFormatter={(label, payload) =>
+                tooltipLabel(
+                  String(label),
+                  numericTooltipValue(payload[0]?.value),
+                  numericTooltipValue(payload[1]?.value),
+                )
+              }
+            />
+            <Bar
+              dataKey={debitKey}
+              name="Debit"
+              fill="#64748b"
+              minPointSize={isCurrency ? 3 : 0}
+              radius={[3, 3, 0, 0]}
+            />
+            <Bar
+              dataKey={creditKey}
+              name="Credit"
+              fill="#0f766e"
+              minPointSize={isCurrency ? 3 : 0}
+              radius={[3, 3, 0, 0]}
+            />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  );
+}
+
+function numericTooltipValue(
+  value: number | string | Array<number | string> | undefined,
+) {
+  if (Array.isArray(value) || value === undefined) return 0;
+  return Number(value);
 }
 
 function DashboardSkeleton() {

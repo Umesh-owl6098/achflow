@@ -22,6 +22,9 @@ const response = {
   },
   dailyVolume: Array.from({ length: 7 }, (_, index) => ({
     date: `2026-07-${String(24 + index).padStart(2, "0")}`,
+    debitCount: 0,
+    creditCount: 0,
+    totalCount: 0,
     debitAmountCents: "0",
     creditAmountCents: "0",
     totalAmountCents: "0",
@@ -73,6 +76,11 @@ describe("Dashboard", () => {
     renderDashboard();
     expect((await screen.findAllByText("$25.00")).length).toBeGreaterThan(0);
     expect(screen.getByText("Demo Merchant")).toBeInTheDocument();
+    expect(screen.getByText("Transactions")).toBeInTheDocument();
+    expect(screen.getByText("Amounts")).toBeInTheDocument();
+    expect(
+      screen.getByText("Today: 0 total · 0 debit · 0 credit"),
+    ).toBeInTheDocument();
   });
   it("renders an empty state for an empty payment database", async () => {
     vi.stubGlobal(

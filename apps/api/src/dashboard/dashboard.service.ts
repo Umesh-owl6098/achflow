@@ -103,11 +103,21 @@ function buildSummary(payments: DashboardPayment[]) {
 }
 
 function buildDailyVolume(payments: DashboardPayment[], start: Date) {
-  const records = new Map<string, { debit: bigint; credit: bigint }>();
+  const records = new Map<
+    string,
+    {
+      debit: bigint;
+      credit: bigint;
+      debitCount: number;
+      creditCount: number;
+    }
+  >();
   for (let index = 0; index < 7; index += 1) {
     records.set(formatUtcDate(addUtcDays(start, index)), {
       debit: BigInt(0),
       credit: BigInt(0),
+      debitCount: 0,
+      creditCount: 0,
     });
   }
 
@@ -117,13 +127,18 @@ function buildDailyVolume(payments: DashboardPayment[], start: Date) {
     if (!record) continue;
     if (payment.direction === PaymentDirection.DEBIT) {
       record.debit += payment.amountCents;
+      record.debitCount += 1;
     } else {
       record.credit += payment.amountCents;
+      record.creditCount += 1;
     }
   }
 
   return [...records.entries()].map(([date, amount]) => ({
     date,
+    debitCount: amount.debitCount,
+    creditCount: amount.creditCount,
+    totalCount: amount.debitCount + amount.creditCount,
     debitAmountCents: amount.debit.toString(),
     creditAmountCents: amount.credit.toString(),
     totalAmountCents: (amount.debit + amount.credit).toString(),

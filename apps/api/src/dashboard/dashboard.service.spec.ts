@@ -60,25 +60,26 @@ describe('DashboardService', () => {
 
   it('keeps the current UTC chart bucket equal to current-day card totals', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-22T12:00:00.000Z'));
-    const debit = {
-      ...payment('debit-25', merchantA, 25n),
+    const debits = Array.from({ length: 20 }, (_, index) => ({
+      ...payment(`debit-${index}`, merchantA, 5n),
       direction: PaymentDirection.DEBIT,
       status: PaymentStatus.SUBMITTED,
       createdAt: new Date('2026-08-22T00:01:00.000Z'),
-    };
-    const credit = {
-      ...payment('credit-30', merchantB, 30n),
+    }));
+    const credits = Array.from({ length: 20 }, (_, index) => ({
+      ...payment(`credit-${index}`, merchantB, 6n),
       direction: PaymentDirection.CREDIT,
       status: PaymentStatus.VALIDATED,
       createdAt: new Date('2026-08-22T23:59:00.000Z'),
-    };
+    }));
+    const todayPayments = [...debits, ...credits];
     const prisma = {
       payment: {
         findMany: jest
           .fn()
-          .mockResolvedValueOnce([debit, credit])
-          .mockResolvedValueOnce([debit, credit])
-          .mockResolvedValueOnce([credit, debit]),
+          .mockResolvedValueOnce(todayPayments)
+          .mockResolvedValueOnce(todayPayments)
+          .mockResolvedValueOnce(todayPayments),
         groupBy: jest.fn().mockResolvedValue([]),
       },
     };
@@ -88,16 +89,20 @@ describe('DashboardService', () => {
 
     expect(dashboard.summary).toEqual(
       expect.objectContaining({
-        totalAmountCents: '55',
-        debitAmountCents: '25',
-        creditAmountCents: '30',
+        paymentsToday: 40,
+        totalAmountCents: '220',
+        debitAmountCents: '100',
+        creditAmountCents: '120',
       }),
     );
     expect(dashboard.dailyVolume.at(-1)).toEqual({
       date: '2026-08-22',
-      debitAmountCents: '25',
-      creditAmountCents: '30',
-      totalAmountCents: '55',
+      debitCount: 20,
+      creditCount: 20,
+      totalCount: 40,
+      debitAmountCents: '100',
+      creditAmountCents: '120',
+      totalAmountCents: '220',
     });
   });
 

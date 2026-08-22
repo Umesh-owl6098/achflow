@@ -12,6 +12,9 @@ export type DashboardSummary = {
 
 export type DailyVolume = {
   date: string;
+  debitCount: number;
+  creditCount: number;
+  totalCount: number;
   debitAmountCents: string;
   creditAmountCents: string;
   totalAmountCents: string;
@@ -40,8 +43,12 @@ export type DashboardData = {
 
 export type DashboardChartPoint = {
   date: string;
+  debitCount: number;
+  creditCount: number;
+  totalCount: number;
   debitCents: number;
   creditCents: number;
+  totalCents: number;
 };
 
 export function dashboardChartSeries(
@@ -49,8 +56,12 @@ export function dashboardChartSeries(
 ): DashboardChartPoint[] {
   return dailyVolume.map((day) => ({
     date: day.date,
+    debitCount: day.debitCount,
+    creditCount: day.creditCount,
+    totalCount: day.totalCount,
     debitCents: Number(BigInt(day.debitAmountCents)),
     creditCents: Number(BigInt(day.creditAmountCents)),
+    totalCents: Number(BigInt(day.totalAmountCents)),
   }));
 }
 
@@ -59,6 +70,26 @@ export function formatChartCents(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+export function formatCompactChartCents(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 0,
+  }).format(value / 100);
+}
+
+export function formatUtcChartDay(
+  date: string,
+  currentUtcDate: string,
+): string {
+  if (date === currentUtcDate) return "Today";
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`));
 }
 
 export function parseDashboardData(value: unknown): DashboardData {
@@ -87,6 +118,21 @@ export function parseDashboardData(value: unknown): DashboardData {
     ].every((item) => typeof item === "string")
   ) {
     throw new Error("The dashboard summary has an invalid format.");
+  }
+  if (
+    !value.dailyVolume.every(
+      (day) =>
+        isRecord(day) &&
+        typeof day.date === "string" &&
+        typeof day.debitCount === "number" &&
+        typeof day.creditCount === "number" &&
+        typeof day.totalCount === "number" &&
+        typeof day.debitAmountCents === "string" &&
+        typeof day.creditAmountCents === "string" &&
+        typeof day.totalAmountCents === "string",
+    )
+  ) {
+    throw new Error("The dashboard daily volume has an invalid format.");
   }
   return value as DashboardData;
 }
