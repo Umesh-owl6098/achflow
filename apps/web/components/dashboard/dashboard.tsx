@@ -21,6 +21,8 @@ import { StatusBadge } from "@/components/foundation/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   DashboardData,
+  dashboardChartSeries,
+  formatChartCents,
   formatUsd,
   parseDashboardData,
   statusTone,
@@ -121,14 +123,7 @@ export function Dashboard() {
       />
     );
 
-  const chartData = data.dailyVolume.map((day) => ({
-    date: new Intl.DateTimeFormat("en-US", {
-      weekday: "short",
-      timeZone: "UTC",
-    }).format(new Date(`${day.date}T00:00:00Z`)),
-    debit: Number(BigInt(day.debitAmountCents)) / 100,
-    credit: Number(BigInt(day.creditAmountCents)) / 100,
-  }));
+  const chartData = dashboardChartSeries(data.dailyVolume);
 
   return (
     <div className="space-y-6">
@@ -215,28 +210,32 @@ export function Dashboard() {
                   axisLine={false}
                   tickLine={false}
                   tick={{ fontSize: 12 }}
+                  tickFormatter={(value: string) =>
+                    new Intl.DateTimeFormat("en-US", {
+                      weekday: "short",
+                      timeZone: "UTC",
+                    }).format(new Date(`${value}T00:00:00Z`))
+                  }
                 />
                 <YAxis
                   axisLine={false}
                   tickLine={false}
                   tick={{ fontSize: 12 }}
-                  tickFormatter={(value: number) => `$${value}`}
+                  tickFormatter={formatChartCents}
                 />
-                <Tooltip
-                  formatter={(value: number) =>
-                    `$${value.toLocaleString("en-US", { minimumFractionDigits: 2 })}`
-                  }
-                />
+                <Tooltip formatter={formatChartCents} />
                 <Bar
-                  dataKey="debit"
+                  dataKey="debitCents"
                   name="Debit"
                   fill="#64748b"
+                  minPointSize={3}
                   radius={[3, 3, 0, 0]}
                 />
                 <Bar
-                  dataKey="credit"
+                  dataKey="creditCents"
                   name="Credit"
                   fill="#0f766e"
+                  minPointSize={3}
                   radius={[3, 3, 0, 0]}
                 />
               </BarChart>

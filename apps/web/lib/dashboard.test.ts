@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatUsd, parseDashboardData, statusTone } from "./dashboard";
+import {
+  dashboardChartSeries,
+  formatChartCents,
+  formatUsd,
+  parseDashboardData,
+  statusTone,
+} from "./dashboard";
 
 const dashboard = {
   summary: {
@@ -18,6 +24,20 @@ const dashboard = {
 };
 
 describe("dashboard utilities", () => {
+  it("maps current-day debit and credit cents to the chart without double conversion", () => {
+    expect(
+      dashboardChartSeries([
+        {
+          date: "2026-08-22",
+          debitAmountCents: "25",
+          creditAmountCents: "30",
+          totalAmountCents: "55",
+        },
+      ]),
+    ).toEqual([{ date: "2026-08-22", debitCents: 25, creditCents: 30 }]);
+    expect(formatChartCents(25)).toBe("$0.25");
+    expect(formatChartCents(30)).toBe("$0.30");
+  });
   it("formats cents as USD", () => expect(formatUsd("2500")).toBe("$25.00"));
   it("maps ACH statuses to dashboard badge tones", () => {
     expect(statusTone("SETTLED")).toBe("success");

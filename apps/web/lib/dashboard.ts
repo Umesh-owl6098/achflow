@@ -38,6 +38,29 @@ export type DashboardData = {
   generatedAt: string;
 };
 
+export type DashboardChartPoint = {
+  date: string;
+  debitCents: number;
+  creditCents: number;
+};
+
+export function dashboardChartSeries(
+  dailyVolume: DailyVolume[],
+): DashboardChartPoint[] {
+  return dailyVolume.map((day) => ({
+    date: day.date,
+    debitCents: Number(BigInt(day.debitAmountCents)),
+    creditCents: Number(BigInt(day.creditAmountCents)),
+  }));
+}
+
+export function formatChartCents(value: number): string {
+  return `$${(value / 100).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export function parseDashboardData(value: unknown): DashboardData {
   if (
     !isRecord(value) ||

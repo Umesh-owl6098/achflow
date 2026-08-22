@@ -58,6 +58,49 @@ describe('DashboardService', () => {
     );
   });
 
+  it('keeps the current UTC chart bucket equal to current-day card totals', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-22T12:00:00.000Z'));
+    const debit = {
+      ...payment('debit-25', merchantA, 25n),
+      direction: PaymentDirection.DEBIT,
+      status: PaymentStatus.SUBMITTED,
+      createdAt: new Date('2026-08-22T00:01:00.000Z'),
+    };
+    const credit = {
+      ...payment('credit-30', merchantB, 30n),
+      direction: PaymentDirection.CREDIT,
+      status: PaymentStatus.VALIDATED,
+      createdAt: new Date('2026-08-22T23:59:00.000Z'),
+    };
+    const prisma = {
+      payment: {
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce([debit, credit])
+          .mockResolvedValueOnce([debit, credit])
+          .mockResolvedValueOnce([credit, debit]),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new DashboardService(prisma as never);
+
+    const dashboard = await service.getAdminDashboard();
+
+    expect(dashboard.summary).toEqual(
+      expect.objectContaining({
+        totalAmountCents: '55',
+        debitAmountCents: '25',
+        creditAmountCents: '30',
+      }),
+    );
+    expect(dashboard.dailyVolume.at(-1)).toEqual({
+      date: '2026-08-22',
+      debitAmountCents: '25',
+      creditAmountCents: '30',
+      totalAmountCents: '55',
+    });
+  });
+
   it('aggregates payments from multiple merchants for the admin all-merchants scope', async () => {
     const payments = [
       payment('payment-a', merchantA, 100n),
